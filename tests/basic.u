@@ -1,0 +1,9 @@
+extern putchard(x)
+
+another_function() {
+	return putchard(42);
+}
+
+main() {
+	return another_function();
+}
