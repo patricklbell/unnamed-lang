@@ -1,9 +1,28 @@
-extern putchard(x)
+fibonacci(x) {
+	if x <= 0 {
+		return 0;
+	}
+	if x == 1 {
+		return 1;
+	}
 
-another_function() {
-	return putchard(42);
+	return fibonacci(x - 1) + fibonacci(x - 2);
 }
 
+/*
+print_alphabet() {
+	i := 97;
+	while i <= 122 {
+		putcharf(i);
+		i = i + 1;
+	}
+	
+	return 0;
+}
+*/
+
+/*
 main() {
-	return another_function();
+	return fibonacci(10);
 }
+*/

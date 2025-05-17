@@ -5,13 +5,14 @@
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <unordered_map>
 
 struct NamedValue {
-  llvm::Value* llvm_value = nullptr;
+  llvm::AllocaInst* llvm_alloca_inst = nullptr;
 };
 
 struct ModuleContext {
@@ -32,4 +33,6 @@ struct CompilerContext {
 
 void codegen_module(AST& ast, CompilerContext& context, std::string name);
 
-void run_module(CompilerContext& context, std::string name);
+int emit_object_code(CompilerContext& context);
+
+void jit_run_module(CompilerContext& context, std::string name);

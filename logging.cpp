@@ -29,6 +29,10 @@ void ConsoleLogger::log(Errors error, const std::string& message, TextSpan span)
   );
 }
 
+bool ConsoleLogger::is_error() {
+  return messages.size() > 0;
+}
+
 void ConsoleLogger::commit(const FileManager& file_manager) {
   std::unordered_map<int, std::vector<LogMessage*>> file_to_messages;
   for (auto& m : messages) {

@@ -15,6 +15,11 @@
 #include "ast.hpp"
 #include "code_generation.hpp"
 
+static std::string_view strip_file_extension(std::string_view in) {
+  size_t lastindex = in.find_last_of("."); 
+  return in.substr(0, lastindex); 
+}
+
 int main(int argc, char** argv) {
   if (argc <= 1) {
     std::cerr << "No input files, exiting.\n";
@@ -28,6 +33,7 @@ int main(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     auto path = std::string(argv[i]);
+    std::string module_name(strip_file_extension(path));
 
     Reader source(path);
     Lexer lexer(source, fm.add(path));
@@ -36,16 +42,17 @@ int main(int argc, char** argv) {
     make_ast(ast, lexer, logger);
     print_ast(ast);
 
-    codegen_module(ast, context, path);
+    if (logger.is_error()) {
+      logger.commit(fm);
+      return 1;
+    }
 
-    // Print out all of the generated code.
-    context.modules[path].llvm_module->print(llvm::errs(), nullptr);
-
-    // run the module
-    run_module(context, path);
+    codegen_module(ast, context, module_name);
   }
 
+  // print warnings etc.
   logger.commit(fm);
 
-  return 0;
+  // compile modules to object files
+  return emit_object_code(context);
 }

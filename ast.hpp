@@ -2,20 +2,30 @@
 
 #include "lexer.hpp"
 #include "logging.hpp"
+#include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <memory>
 
 enum class ASTNodeType : char {
   Unknown = 0,
-  Assignment,
   Return,
-  Literal,
-  Call,
+  VariableDefinition,
+  ExpressionStatement,
+  If,
+  While,
   Prototype,
   FunctionDefinition,
   Block,
   Module,
+
+  Literal,
+  Variable,
+  BinaryOperator,
+  UnaryOperator,
+  Call,
+  Assignment,
 };
 
 std::string to_string(const ASTNodeType& type);
@@ -39,8 +49,55 @@ struct ASTExpressionData {
   llvm::Value* llvm_value = nullptr;
 };
 
+struct ASTExpressionStatementData {};
+
 struct ASTLiteralData : ASTExpressionData {
   float value;
+};
+
+struct ASTVariableData: ASTExpressionData {
+  std::string name;
+};
+
+enum class BinaryOperator {
+  Plus,
+  Minus,
+  Multiply,
+  Divide,
+  Less,
+  LessEq,
+  Greater,
+  GreaterEq,
+  Equal,
+  LogicalAnd,
+  LogicalOr,
+};
+
+std::string to_string(BinaryOperator op);
+
+struct ASTBinaryOperatorData : ASTExpressionData {
+  BinaryOperator op;
+
+  enum class Children {
+    LHS = 1,
+    RHS,
+  };
+};
+
+enum class UnaryOperator {
+  Plus,
+  Minus,
+  LogicalNot,
+};
+
+std::string to_string(UnaryOperator op);
+
+struct ASTUnaryOperatorData : ASTExpressionData {
+   UnaryOperator op;
+
+  enum class Children {
+    Expression = 1,
+  };
 };
 
 struct ASTCallData : ASTExpressionData {
@@ -53,7 +110,7 @@ struct ASTReturnData {
   };
 };
 
-struct ASTAssignmentData {
+struct ASTAssignmentData : ASTExpressionData {
   std::string name;
 
   enum class Children {
@@ -61,8 +118,25 @@ struct ASTAssignmentData {
   };
 };
 
+struct ASTVariableDefinitionData {
+  std::string name;
+
+  enum class Children {
+    Expression = 1,
+  };
+};
+
+struct ASTIfData {
+  bool has_else;
+
+  llvm::BasicBlock* llvm_merged_bb = nullptr;
+};
+
+struct ASTWhileData {};
+
 struct ArgumentPrototype {
   std::string name;
+  llvm::AllocaInst* llvm_alloca_inst = nullptr;
 };
 
 struct ASTPrototypeData {
@@ -73,12 +147,11 @@ struct ASTPrototypeData {
 };
 
 struct ASTBlockData {
-
+  std::string llvm_bb_name = "block";
+  llvm::BasicBlock* llvm_bb = nullptr;
 };
 
-struct ASTModuleData {
-
-};
+struct ASTModuleData {};
 
 struct ASTFunctionDefinitionData {
   enum class Children {
@@ -86,6 +159,8 @@ struct ASTFunctionDefinitionData {
     Body,
   };
 };
+
+struct AST;
 
 struct ASTNode {
   TextSpan span;
@@ -108,6 +183,13 @@ struct ASTNode {
   T* cast_data() {
     return (T*)data.get();
   }
+
+  template<typename T>
+  const T* cast_data() const {
+    return (const T*)data.get();
+  }
+
+
 };
 
 std::string to_string(const ASTNode& node);
@@ -117,6 +199,41 @@ struct AST {
 
   ASTNode& make_node(ASTNodeType type);
 };
+
+
+class ASTChildrenIterator {
+private:
+  struct ASTChildIter {
+    ASTChildIter(AST& ast, int nodei, int child_index) : ast(ast), id(nodei + 1), child_index(child_index) { };
+    ASTChildIter operator++() {
+      id += ast.nodes[id].size;
+      child_index++;
+      return *this;
+    }
+    ASTNode& operator*() {
+      return ast.nodes[id];
+    }
+    bool operator!=(ASTChildIter &cmp_childiter) {
+      return child_index != cmp_childiter.child_index;
+    }
+    AST& ast;
+    int id;
+    int child_index;
+  };
+
+public:
+  ASTChildrenIterator(AST& ast, int nodei) : ast(ast), nodei(nodei) {}
+
+  ASTChildIter begin() { return ASTChildIter(ast, nodei, 0); }
+
+  ASTChildIter end() { return ASTChildIter(ast, nodei, ast.nodes[nodei].num_children); }
+
+private:
+  AST& ast;
+  int nodei;
+};
+
+int last_child(AST& ast, int nodei);
 
 void make_ast(AST& ast, Lexer& lexer, Logger& logger);
 

@@ -18,6 +18,8 @@ class ConsoleLogger : public Logger {
 public:
   virtual void log(Errors error, const std::string& message, TextSpan span) override;
 
+  bool is_error();
+
   void commit(const FileManager& file_manager); 
 
 private:
