@@ -1,4 +1,4 @@
-fibonacci(x) {
+fibonacci(x: int): int {
 	if x <= 0 {
 		return 0;
 	}
@@ -10,7 +10,7 @@ fibonacci(x) {
 }
 
 /*
-print_alphabet() {
+print_alphabet(): int {
 	i := 97;
 	while i <= 122 {
 		putcharf(i);
@@ -18,11 +18,5 @@ print_alphabet() {
 	}
 	
 	return 0;
-}
-*/
-
-/*
-main() {
-	return fibonacci(10);
 }
 */

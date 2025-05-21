@@ -4,8 +4,9 @@
 #include <vector>
 #include "lexer.hpp"
 
-enum class Errors {
+enum class Errors : int64_t {
   Syntax = (1 << 0),
+  Type 	 = (1 << 1),
 };
 
 class Logger {

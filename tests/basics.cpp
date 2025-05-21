@@ -1,7 +1,7 @@
 #include <iostream>
 
 extern "C" {
-    float fibonacci(float);
+    int64_t fibonacci(int64_t);
 }
 
 int main() {

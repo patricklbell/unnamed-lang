@@ -54,7 +54,9 @@ Reader::Reader(const std::string& filename) {
 }
 
 Reader::~Reader() {
-  fclose(fd);
+  if (fd != nullptr)
+    fclose(fd);
+  fd = nullptr;
 }
 
 bool Reader::eof() {

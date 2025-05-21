@@ -81,3 +81,6 @@ private:
 
   llvm::orc::JITDylib &MainJD;
 };
+
+struct CompilerContext;
+void jit_run_module(CompilerContext& ctx, std::string& name);

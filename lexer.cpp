@@ -47,8 +47,6 @@ static bool try_merge(Token& t1, Token& t2) {
     t1.type = TokenType::DoubleAnd;
   else if (t1.type == TokenType::Pipe && t2.type == TokenType::Pipe)
     t1.type = TokenType::DoublePipe;
-  else if (t1.type == TokenType::Colon && t2.type == TokenType::Equals)
-    t1.type = TokenType::Walrus;
   else
     merged = false;
 

@@ -2,6 +2,7 @@
 
 #include "ast.hpp"
 #include "jit.hpp"
+#include "type_generation.hpp"
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/IRBuilder.h>
@@ -31,8 +32,6 @@ struct CompilerContext {
   CompilerContext();
 };
 
-void codegen_module(AST& ast, CompilerContext& context, std::string name);
+void codegen(AST& ast, CompilerContext& context, TypeInfo& types);
 
 int emit_object_code(CompilerContext& context);
-
-void jit_run_module(CompilerContext& context, std::string name);

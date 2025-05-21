@@ -26,8 +26,11 @@ ASTNode::ASTNode(ASTNodeType _type) : data(unique_void(new ASTUnkownData{})) {
     case ASTNodeType::ExpressionStatement:
        data = unique_void(new ASTExpressionStatementData{});
        return;
-    case ASTNodeType::Literal:
-       data = unique_void(new ASTLiteralData{});
+    case ASTNodeType::IntLiteral:
+       data = unique_void(new ASTIntLiteralData{});
+       return;
+    case ASTNodeType::FloatLiteral:
+       data = unique_void(new ASTFloatLiteralData{});
        return;
     case ASTNodeType::Variable:
        data = unique_void(new ASTVariableData{});
@@ -72,7 +75,8 @@ std::string to_string(const ASTNodeType& type) {
     case ASTNodeType::Return:                 return "Return";
     case ASTNodeType::Call:                   return "Call";
     case ASTNodeType::Assignment:             return "Assignment";
-    case ASTNodeType::Literal:                return "Literal";
+    case ASTNodeType::IntLiteral:             return "IntLiteral";
+    case ASTNodeType::FloatLiteral:           return "FloatLiteral";
     case ASTNodeType::Variable:               return "Variable";
     case ASTNodeType::BinaryOperator:         return "BinaryOperator";
     case ASTNodeType::UnaryOperator:          return "UnaryOperator";
@@ -88,8 +92,8 @@ std::string to_string(const ASTNodeType& type) {
 }
 
 ASTNode& AST::make_node(ASTNodeType type) {
-  auto& node = nodes.emplace_back(type);
-  node.id = nodes.size() - 1;
+  auto& node = this->nodes.emplace_back(type);
+  node.id = this->nodes.size() - 1;
   return node;
 }
 
@@ -209,23 +213,30 @@ static bool match_variable(const Lexer& lexer) {
 }
 
 static int parse_literal(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::Literal, lexer);
+  auto t = lexer.peek_token();
+  lexer.consume_token();
 
-  {
-    auto t = lexer.peek_token();
-    lexer.consume_token();
+  if (t.type == TokenType::Integer) {
+    int nodei = make_node(ast, ASTNodeType::IntLiteral, lexer);
+    auto& node = ast.nodes[nodei];
 
-    if (!(t.type == TokenType::Float || t.type == TokenType::Integer)) {
-      logger.log(Errors::Syntax, "Expected float or integer literal, not '" + to_string(t) + "'.", t.span);
-      ast.nodes[nodei].malformed = true;
-      return nodei;
-    }
+    node.cast_data<ASTIntLiteralData>()->value = std::stoi(t.value);
+    node.span.absorb(t.span);
 
-    ast.nodes[nodei].span.absorb(t.span);
-    ast.nodes[nodei].data = unique_void(new ASTLiteralData{ .value = std::stof(t.value) });
+    return nodei;
   }
+  else if (t.type == TokenType::Float) {
+    int nodei = make_node(ast, ASTNodeType::FloatLiteral, lexer);
+    auto& node = ast.nodes[nodei];
 
-  return nodei;
+    node.cast_data<ASTFloatLiteralData>()->value = std::stof(t.value);
+    node.span.absorb(t.span);
+    
+    return nodei;
+  }
+  
+  LANG_ASSERT("Missing parsing for matched literal");
+  return -1;
 }
 
 static bool match_literal(const Lexer& lexer) {
@@ -463,7 +474,7 @@ static void parse_expression_add_child(AST& ast, Lexer& lexer, Logger& logger, i
 static bool match_variable_definition(const Lexer& lexer) {
   return (
     lexer.peek_type(0) == TokenType::Name &&
-    lexer.peek_type(1) == TokenType::Walrus
+    lexer.peek_type(1) == TokenType::Colon
   );
 }
 
@@ -474,14 +485,28 @@ static int parse_variable_definition(AST& ast, Lexer& lexer, Logger& logger) {
   {
     auto name = lexer.peek_token();
     if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer)) {
-      logger.log(Errors::Syntax, "Varaible defintion expected variable name.", name.span);
+      logger.log(Errors::Syntax, "Variable definition expected variable name.", name.span);
       return nodei;
     }
     data->name = name.value;
   }
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Walrus, lexer)) {
-    logger.log(Errors::Syntax, "Assignment expected ':='.", lexer.peek_span());
+  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer)) {
+    logger.log(Errors::Syntax, "Variable definition expected ':=' or ': [type] =.", lexer.peek_span());
+    return nodei;
+  }
+
+  if (lexer.peek_type() == TokenType::Name) {
+    auto type = lexer.peek_token();
+    if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer)) {
+      logger.log(Errors::Syntax, "Expected a type name.", type.span);
+      return nodei;
+    }
+    data->type = type.value;
+  }
+  
+  if (!expect_token(ast.nodes[nodei], TokenType::Equals, lexer)) {
+    logger.log(Errors::Syntax, "Variable definition expected ':=' or ': [type] =.", lexer.peek_span());
     return nodei;
   }
 
@@ -645,10 +670,27 @@ static int parse_prototype(AST& ast, Lexer& lexer, Logger& logger) {
       ast.nodes[nodei].span.absorb(t.span);
       lexer.consume_token();
 
-      data->args.emplace_back(ArgumentPrototype{ .name = t.value });
+      // expect type name
+      auto nextt = lexer.peek_token();
+      if (nextt.type != TokenType::Colon) {
+        logger.log(Errors::Syntax, "Expected ':' then a type in argument list.", nextt.span);
+        ast.nodes[nodei].malformed = true;
+        continue;
+      }
+      lexer.consume_token();
+
+      nextt = lexer.peek_token();
+      if (nextt.type != TokenType::Name) {
+        logger.log(Errors::Syntax, "Expected type after ':' in argument list.", nextt.span);
+        ast.nodes[nodei].malformed = true;
+        continue;
+      }
+      lexer.consume_token();
+
+      data->args.emplace_back(ArgumentPrototype{ .name = t.value, .type = nextt.value });
 
       // consume commas between arguments
-      auto nextt = lexer.peek_token();
+      nextt = lexer.peek_token();
       if (nextt.type == TokenType::Comma) {
         lexer.consume_token();
       } else if (nextt.type == TokenType::RightParenthesis) {
@@ -669,6 +711,18 @@ static int parse_prototype(AST& ast, Lexer& lexer, Logger& logger) {
       ast.nodes[nodei].malformed = true;
     }
   }
+
+  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer)) {
+    logger.log(Errors::Syntax, "Expected ':' then return type after ')'.", lexer.peek_span());
+    return nodei;
+  }
+
+  auto type = lexer.peek_token();
+  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer)) {
+    logger.log(Errors::Syntax, "Expected return type after ':'.", lexer.peek_span());
+    return nodei;
+  }
+  data->return_type = type.value;
 
   return nodei;
 }
@@ -721,8 +775,9 @@ static int parse_function_prototype(AST& ast, Lexer& lexer, Logger& logger) {
   return parse_prototype(ast, lexer, logger);
 }
 
-void make_ast(AST& ast, Lexer& lexer, Logger& logger) {
+void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger) {
   int modulei = make_node(ast, ASTNodeType::Module, lexer);
+  ast.nodes[modulei].cast_data<ASTModuleData>()->name = name;
 
   // parse top level statements
   while (true) {
@@ -778,8 +833,11 @@ std::string to_string(const ASTNode& node) {
     case ASTNodeType::UnaryOperator:
       res += " (" + to_string(node.cast_data<ASTUnaryOperatorData>()->op) + ")";
       break;
-    case ASTNodeType::Literal:
-      res +=" (" + std::to_string(node.cast_data<ASTLiteralData>()->value) + ")";
+    case ASTNodeType::IntLiteral:
+      res +=" (" + std::to_string(node.cast_data<ASTIntLiteralData>()->value) + ")";
+      break;
+    case ASTNodeType::FloatLiteral:
+      res +=" (" + std::to_string(node.cast_data<ASTFloatLiteralData>()->value) + ")";
       break;
     case ASTNodeType::Variable:
       res +=" (" + node.cast_data<ASTVariableData>()->name + ")";

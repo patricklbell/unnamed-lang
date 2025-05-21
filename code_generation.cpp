@@ -49,6 +49,8 @@ struct CGContext {
 
   std::unordered_map<std::string, ASTPrototypeData*> function_protos;
   std::unordered_map<std::string, NamedValue> named_values;
+
+  TypeInfo* types;
 };
 
 void visit_subtree(AST& ast, CGContext& ctx, int size);
@@ -67,21 +69,38 @@ static llvm::Function* get_function(std::string name, const CGContext& ctx) {
   return nullptr;
 }
 
-static llvm::AllocaInst* add_alloca_to_entry_block(llvm::Function* llvm_function, llvm::LLVMContext* llvm_context, std::string_view name) {
+static llvm::Type* get_llvm_type_for_builtin(llvm::LLVMContext* llvm_context, Type* type) {
+  switch (type->form) {
+    case Type::Form::Float:
+      return llvm::Type::getFloatTy(*llvm_context);
+    case Type::Form::Int:
+      return llvm::Type::getInt64Ty(*llvm_context);
+    case Type::Form::Custom:
+      LANG_ASSERT("@todo");
+    case Type::Form::Unknown:
+      LANG_ASSERT(false);
+  }
+
+  return nullptr;
+}
+
+static llvm::AllocaInst* add_alloca_to_entry_block(llvm::Function* llvm_function, llvm::LLVMContext* llvm_context, Type* type, std::string_view name) {
   llvm::IRBuilder<> tmp_llvm_builder(&llvm_function->getEntryBlock(), llvm_function->getEntryBlock().begin());
-  // @todo types
-  return tmp_llvm_builder.CreateAlloca(llvm::Type::getFloatTy(*llvm_context), nullptr, name);
+  return tmp_llvm_builder.CreateAlloca(get_llvm_type_for_builtin(llvm_context, type), nullptr, name);
 }
 
 static void visit_td_prototype(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT(node.type == ASTNodeType::Prototype);
   ASTPrototypeData* data = node.cast_data<ASTPrototypeData>();
 
-  // make the function type:  double(double,double...)
-  // @todo types
-  std::vector<llvm::Type *> args_types(data->args.size(), llvm::Type::getFloatTy(*ctx.llvm_context));
+  // make the function type
+  std::vector<llvm::Type *> args_types;
+  args_types.reserve((data->args.size()));
+  for (auto& arg : data->args)
+    args_types.push_back(get_llvm_type_for_builtin(ctx.llvm_context, arg.resolved_type));
+
   llvm::FunctionType *function_type = llvm::FunctionType::get(
-    llvm::Type::getFloatTy(*ctx.llvm_context),
+    get_llvm_type_for_builtin(ctx.llvm_context, data->resolved_return_type),
     args_types,
     false
   );
@@ -140,15 +159,18 @@ static void visit_td_if(ASTNode& node, CGContext& ctx) {
 
   // process each if-else [expression, block, expression, block ...]
   // and generate conditional jumps
-  for (int i = 0, offset = node.id + 1; i + 1 < node.num_children; i+=2) {
+  constexpr int IF_ELSE_NUM_NODES = 2;
+  constexpr int ELSE_NUM_NODES = 1;
+  static_assert(ELSE_NUM_NODES < IF_ELSE_NUM_NODES);
+  for (int i = 0, offset = node.id + 1; i + ELSE_NUM_NODES < node.num_children; i+=IF_ELSE_NUM_NODES) {
     ASTNode& cond = ctx.ast->nodes[offset];
     ASTNode& block = ctx.ast->nodes[cond.id + cond.size];
     offset = block.id + block.size;
 
     LANG_ASSERT(block.type == ASTNodeType::Block);
 
-    // @note recursion limit
     // generate the condition llvm value
+    // @note recursion limit
     ctx.nodei = cond.id;
     visit_subtree(*ctx.ast, ctx, cond.size);
 
@@ -158,7 +180,7 @@ static void visit_td_if(ASTNode& node, CGContext& ctx) {
     ASTBlockData* block_data = block.cast_data<ASTBlockData>();
     block_data->llvm_bb = llvm::BasicBlock::Create(*ctx.llvm_context);
 
-    bool last_condition = i + 3 >= node.num_children;
+    bool last_condition = i + IF_ELSE_NUM_NODES + ELSE_NUM_NODES >= node.num_children;
 
     if (last_condition) {
       ctx.llvm_builder->CreateCondBr(cond_data->llvm_value, block_data->llvm_bb, llvm_else_bb);
@@ -223,8 +245,8 @@ static void visit_td_while(ASTNode& node, CGContext& ctx) {
 
   llvm::BasicBlock *llvm_merged_bb = llvm::BasicBlock::Create(*ctx.llvm_context, "whilecont");
 
-  // @note recursion limit
   // generate the condition llvm value
+  // @note recursion limit
   ctx.llvm_builder->SetInsertPoint(llvm_cond_bb);
   ctx.nodei = cond.id;
   visit_subtree(*ctx.ast, ctx, cond.size);
@@ -278,7 +300,7 @@ static void visit_td_function_definition(ASTNode& node, CGContext& ctx) {
   for (auto &llvm_arg : prototype_data->llvm_function->args()) {
     auto &arg = prototype_data->args[idx];
 
-    arg.llvm_alloca_inst = add_alloca_to_entry_block(prototype_data->llvm_function, ctx.llvm_context, arg.name);
+    arg.llvm_alloca_inst = add_alloca_to_entry_block(prototype_data->llvm_function, ctx.llvm_context, arg.resolved_type, arg.name);
     ctx.llvm_builder->CreateStore(&llvm_arg, arg.llvm_alloca_inst);
     ctx.named_values[arg.name] = NamedValue{ .llvm_alloca_inst = arg.llvm_alloca_inst };
 
@@ -312,11 +334,21 @@ static void visit_bu_variable(ASTNode& node, CGContext& ctx) {
   ASTVariableData* data = node.cast_data<ASTVariableData>();
 
   auto named_value_lu = ctx.named_values.find(data->name);
-  if (named_value_lu == ctx.named_values.end())
-    // @todo logging, static checking
-    return;
+  LANG_ASSERT(named_value_lu != ctx.named_values.end());
 
-  data->llvm_value = ctx.llvm_builder->CreateLoad(llvm::Type::getFloatTy(*ctx.llvm_context), named_value_lu->second.llvm_alloca_inst);
+  switch (data->resolved_type->form) {
+    case Type::Form::Float:
+      data->llvm_value = ctx.llvm_builder->CreateLoad(llvm::Type::getFloatTy(*ctx.llvm_context), named_value_lu->second.llvm_alloca_inst);
+      break;
+    case Type::Form::Int:
+      data->llvm_value = ctx.llvm_builder->CreateLoad(llvm::Type::getInt64Ty(*ctx.llvm_context), named_value_lu->second.llvm_alloca_inst);
+      break;
+    case Type::Form::Custom:
+      LANG_ASSERT(false, "@todo");
+    case Type::Form::Unknown:
+      LANG_ASSERT(false, "cannot use this type in a binary expression");
+      break;
+  }
 }
 
 static void visit_bu_assignment(ASTNode& node, CGContext& ctx) {
@@ -333,10 +365,17 @@ static void visit_bu_assignment(ASTNode& node, CGContext& ctx) {
   data->llvm_value = exp_data->llvm_value;
 }
 
-static void visit_bu_literal(ASTNode& node, CGContext& ctx) {
-  LANG_ASSERT(node.type == ASTNodeType::Literal);
-  ASTLiteralData* data = node.cast_data<ASTLiteralData>();
+static void visit_bu_int_literal(ASTNode& node, CGContext& ctx) {
+  LANG_ASSERT(node.type == ASTNodeType::IntLiteral);
 
+  ASTIntLiteralData* data = node.cast_data<ASTIntLiteralData>();
+  data->llvm_value = llvm::ConstantInt::get(*ctx.llvm_context, llvm::APInt(64, data->value));
+}
+
+static void visit_bu_float_literal(ASTNode& node, CGContext& ctx) {
+  LANG_ASSERT(node.type == ASTNodeType::FloatLiteral);
+
+  ASTFloatLiteralData* data = node.cast_data<ASTFloatLiteralData>();
   data->llvm_value = llvm::ConstantFP::get(*ctx.llvm_context, llvm::APFloat(data->value));
 }
 
@@ -352,40 +391,92 @@ static void visit_bu_binary_operator(ASTNode& node, CGContext& ctx) {
   auto& LHS_llvm_value = LHS.cast_data<ASTExpressionData>()->llvm_value;
   auto& RHS_llvm_value = RHS.cast_data<ASTExpressionData>()->llvm_value;
 
-  // @todo types
-  switch (data->op) {
-    case BinaryOperator::Plus:
-      data->llvm_value = ctx.llvm_builder->CreateFAdd(LHS_llvm_value, RHS_llvm_value, "addtmp");
+  auto& LHS_resolved_type = LHS.cast_data<ASTExpressionData>()->resolved_type;
+  auto& RHS_resolved_type = RHS.cast_data<ASTExpressionData>()->resolved_type;
+
+  LANG_ASSERT(LHS_resolved_type == RHS_resolved_type);
+  switch (LHS_resolved_type->form) {
+    case Type::Form::Float:
+    {
+      switch (data->op) {
+        case BinaryOperator::Plus:
+          data->llvm_value = ctx.llvm_builder->CreateFAdd(LHS_llvm_value, RHS_llvm_value, "addtmp");
+          break;
+        case BinaryOperator::Minus:
+          data->llvm_value = ctx.llvm_builder->CreateFSub(LHS_llvm_value, RHS_llvm_value, "subtmp");
+          break;
+        case BinaryOperator::Multiply:
+          data->llvm_value = ctx.llvm_builder->CreateFMul(LHS_llvm_value, RHS_llvm_value, "multmp");
+          break;
+        case BinaryOperator::Divide:
+          data->llvm_value = ctx.llvm_builder->CreateFDiv(LHS_llvm_value, RHS_llvm_value, "divtmp");
+          break;
+        case BinaryOperator::Less:
+          data->llvm_value = ctx.llvm_builder->CreateFCmpULT(LHS_llvm_value, RHS_llvm_value, "ulttmp");
+          break;
+        case BinaryOperator::LessEq:
+          data->llvm_value = ctx.llvm_builder->CreateFCmpULE(LHS_llvm_value, RHS_llvm_value, "uletmp");
+          break;
+        case BinaryOperator::Greater:
+          data->llvm_value = ctx.llvm_builder->CreateFCmpUGT(LHS_llvm_value, RHS_llvm_value, "ugttmp");
+          break;
+        case BinaryOperator::GreaterEq:
+          data->llvm_value = ctx.llvm_builder->CreateFCmpUGE(LHS_llvm_value, RHS_llvm_value, "ugetmp");
+          break;
+        case BinaryOperator::Equal:
+          data->llvm_value = ctx.llvm_builder->CreateFCmpUEQ(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+        case BinaryOperator::LogicalAnd:
+          data->llvm_value = ctx.llvm_builder->CreateLogicalAnd(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+        case BinaryOperator::LogicalOr:
+          data->llvm_value = ctx.llvm_builder->CreateLogicalOr(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+      }
       break;
-    case BinaryOperator::Minus:
-      data->llvm_value = ctx.llvm_builder->CreateFSub(LHS_llvm_value, RHS_llvm_value, "subtmp");
+    }
+    case Type::Form::Int:
+    {
+      switch (data->op) {
+        case BinaryOperator::Plus:
+          data->llvm_value = ctx.llvm_builder->CreateAdd(LHS_llvm_value, RHS_llvm_value, "addtmp");
+          break;
+        case BinaryOperator::Minus:
+          data->llvm_value = ctx.llvm_builder->CreateSub(LHS_llvm_value, RHS_llvm_value, "subtmp");
+          break;
+        case BinaryOperator::Multiply:
+          data->llvm_value = ctx.llvm_builder->CreateMul(LHS_llvm_value, RHS_llvm_value, "multmp");
+          break;
+        case BinaryOperator::Divide:
+          LANG_ASSERT(false, "@todo");
+          break;
+        case BinaryOperator::Less:
+          data->llvm_value = ctx.llvm_builder->CreateICmpSLT(LHS_llvm_value, RHS_llvm_value, "ulttmp");
+          break;
+        case BinaryOperator::LessEq:
+          data->llvm_value = ctx.llvm_builder->CreateICmpSLE(LHS_llvm_value, RHS_llvm_value, "uletmp");
+          break;
+        case BinaryOperator::Greater:
+          data->llvm_value = ctx.llvm_builder->CreateICmpSGT(LHS_llvm_value, RHS_llvm_value, "ugttmp");
+          break;
+        case BinaryOperator::GreaterEq:
+          data->llvm_value = ctx.llvm_builder->CreateICmpSGE(LHS_llvm_value, RHS_llvm_value, "ugetmp");
+          break;
+        case BinaryOperator::Equal:
+          data->llvm_value = ctx.llvm_builder->CreateICmpEQ(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+        case BinaryOperator::LogicalAnd:
+          data->llvm_value = ctx.llvm_builder->CreateLogicalAnd(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+        case BinaryOperator::LogicalOr:
+          data->llvm_value = ctx.llvm_builder->CreateLogicalOr(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+          break;
+      }
       break;
-    case BinaryOperator::Multiply:
-      data->llvm_value = ctx.llvm_builder->CreateFMul(LHS_llvm_value, RHS_llvm_value, "multmp");
-      break;
-    case BinaryOperator::Divide:
-      data->llvm_value = ctx.llvm_builder->CreateFDiv(LHS_llvm_value, RHS_llvm_value, "divtmp");
-      break;
-    case BinaryOperator::Less:
-      data->llvm_value = ctx.llvm_builder->CreateFCmpULT(LHS_llvm_value, RHS_llvm_value, "ulttmp");
-      break;
-    case BinaryOperator::LessEq:
-      data->llvm_value = ctx.llvm_builder->CreateFCmpULE(LHS_llvm_value, RHS_llvm_value, "uletmp");
-      break;
-    case BinaryOperator::Greater:
-      data->llvm_value = ctx.llvm_builder->CreateFCmpUGT(LHS_llvm_value, RHS_llvm_value, "ugttmp");
-      break;
-    case BinaryOperator::GreaterEq:
-      data->llvm_value = ctx.llvm_builder->CreateFCmpUGE(LHS_llvm_value, RHS_llvm_value, "ugetmp");
-      break;
-    case BinaryOperator::Equal:
-      data->llvm_value = ctx.llvm_builder->CreateFCmpUEQ(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
-      break;
-    case BinaryOperator::LogicalAnd:
-      data->llvm_value = ctx.llvm_builder->CreateLogicalAnd(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
-      break;
-    case BinaryOperator::LogicalOr:
-      data->llvm_value = ctx.llvm_builder->CreateLogicalOr(LHS_llvm_value, RHS_llvm_value, "ueqtmp");
+    }
+    case Type::Form::Custom:
+    case Type::Form::Unknown:
+      LANG_ASSERT(false, "cannot use this type in a binary expression");
       break;
   }
 }
@@ -398,17 +489,40 @@ static void visit_bu_unary_operator(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT((int)ASTUnaryOperatorData::Children::Expression == 1);
 
   auto& exp_llvm_value = exp.cast_data<ASTExpressionData>()->llvm_value;
+  auto& exp_resolved_type = exp.cast_data<ASTExpressionData>()->resolved_type;
 
-  // @todo types
-  switch (data->op) {
-    case UnaryOperator::Minus:
-      data->llvm_value = ctx.llvm_builder->CreateFNeg(exp_llvm_value);
-      break;
-    case UnaryOperator::LogicalNot:
-      data->llvm_value = ctx.llvm_builder->CreateNeg(exp_llvm_value);
-      break;
-    case UnaryOperator::Plus:
-      data->llvm_value = exp_llvm_value;
+  switch (exp_resolved_type->form) {
+    case Type::Form::Float:
+    {
+      switch (data->op) {
+        case UnaryOperator::Minus:
+          data->llvm_value = ctx.llvm_builder->CreateFNeg(exp_llvm_value);
+          break;
+        case UnaryOperator::LogicalNot:
+          LANG_ASSERT(false, "@todo");
+          break;
+        case UnaryOperator::Plus:
+          data->llvm_value = exp_llvm_value;
+          break;
+      }
+    }
+    case Type::Form::Int:
+    {
+      switch (data->op) {
+        case UnaryOperator::Minus:
+          data->llvm_value = ctx.llvm_builder->CreateNeg(exp_llvm_value);
+          break;
+        case UnaryOperator::LogicalNot:
+          LANG_ASSERT(false, "@todo");
+          break;
+        case UnaryOperator::Plus:
+          data->llvm_value = exp_llvm_value;
+          break;
+      }
+    }
+    case Type::Form::Custom:
+    case Type::Form::Unknown:
+      LANG_ASSERT(false, "cannot use this type in a unary expression");
       break;
   }
 }
@@ -416,8 +530,6 @@ static void visit_bu_unary_operator(ASTNode& node, CGContext& ctx) {
 static void visit_bu_call(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT(node.type == ASTNodeType::Call);
   ASTCallData* data = node.cast_data<ASTCallData>();
-
-  // @todo type checking so these asserts are guaranteed
 
   // Look up the name in the global function table.
   llvm::Function *llvm_callee = get_function(data->name, ctx);
@@ -454,7 +566,7 @@ static void visit_bu_variable_definition(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT(ctx.llvm_function != nullptr, "Variable definition must be inside a function.");
   
   auto nv = NamedValue{
-    .llvm_alloca_inst = add_alloca_to_entry_block(ctx.llvm_function, ctx.llvm_context, data->name)
+    .llvm_alloca_inst = add_alloca_to_entry_block(ctx.llvm_function, ctx.llvm_context, data->resolved_type, data->name)
   };
   ctx.named_values[data->name] = nv;
 
@@ -468,8 +580,10 @@ static void visit_bu_variable_definition(ASTNode& node, CGContext& ctx) {
 
 static void visit_bu(ASTNode& node, CGContext& ctx) {
   switch (node.type) {
-    case ASTNodeType::Literal:
-      return visit_bu_literal(node, ctx);
+    case ASTNodeType::IntLiteral:
+      return visit_bu_int_literal(node, ctx);
+    case ASTNodeType::FloatLiteral:
+      return visit_bu_float_literal(node, ctx);
     case ASTNodeType::Variable:
       return visit_bu_variable(node, ctx);
     case ASTNodeType::Assignment:
@@ -513,7 +627,8 @@ static void visit_td(ASTNode& node, CGContext& ctx) {
     case ASTNodeType::Return:
     case ASTNodeType::Assignment:
     case ASTNodeType::ExpressionStatement:
-    case ASTNodeType::Literal:
+    case ASTNodeType::IntLiteral:
+    case ASTNodeType::FloatLiteral:
     case ASTNodeType::Variable:
     case ASTNodeType::BinaryOperator:
     case ASTNodeType::UnaryOperator:
@@ -562,19 +677,6 @@ void visit_subtree(AST& ast, CGContext& ctx, int size) {
   }
 }
 
-
-#ifdef _WIN32
-#define DLLEXPORT __declspec(dllexport)
-#else
-#define DLLEXPORT
-#endif
-
-/// putcharf - putchar that takes a float and returns 0.
-extern "C" DLLEXPORT float putcharf(float X) {
-  fputc((char)X, stderr);
-  return 0;
-}
-
 CompilerContext::CompilerContext() {
   llvm::InitializeAllTargetInfos();
   llvm::InitializeAllTargets();
@@ -593,34 +695,41 @@ CompilerContext::CompilerContext() {
   llvm_jit = std::move(*jit_result);
 }
 
-static void make_module(std::string name, CompilerContext& ctx) {
+static llvm::Module* make_module(std::string name, CompilerContext& ctx) {
   auto llvm_module = std::make_unique<llvm::Module>(name, *ctx.llvm_context);
 
   ctx.modules[name] = ModuleContext{
     .name = name,
     .llvm_module = std::move(llvm_module),
   };
+
+  return ctx.modules[name].llvm_module.get();
 }
 
-void codegen_module(AST& ast, CompilerContext& compiler_context, std::string name) {
+void codegen(AST& ast, CompilerContext& compiler_context, TypeInfo& types) {
   int nodei = 0, last_visited_nodei = -1;
-
-  make_module(name, compiler_context);
   auto ctx = CGContext{
     .nodei = nodei,
     .last_visited_nodei = last_visited_nodei,
     .ast = &ast,
     .llvm_context = compiler_context.llvm_context.get(),
     .llvm_builder = compiler_context.llvm_builder.get(),
-    .llvm_module = compiler_context.modules[name].llvm_module.get(),
+    .llvm_module = nullptr,
+    .types = &types,
   };
 
-  if (ast.nodes.empty())
-    return;
+  for (int modulei = 0; modulei < ast.nodes.size();) {
+    auto& module = ast.nodes[modulei];
+    LANG_ASSERT(module.type == ASTNodeType::Module, "expected module at top-level");
+    ASTModuleData* module_data = module.cast_data<ASTModuleData>();
+  
+    ctx.llvm_module = make_module(module_data->name, compiler_context);
+    ctx.nodei = modulei;
+    visit_subtree(ast, ctx, module.size);
 
-  visit_subtree(ast, ctx, ast.nodes.size());
+    modulei += module.size;
+  }
 }
-
 
 int emit_object_code(CompilerContext& ctx) {
   auto target_triple = LLVMGetDefaultTargetTriple();
@@ -688,48 +797,4 @@ int emit_object_code(CompilerContext& ctx) {
   }
 
   return 0;
-}
-
-void jit_run_module(CompilerContext& ctx, std::string name) {
-  auto module_lu = ctx.modules.find(name);
-  if (module_lu == ctx.modules.end()) {
-    std::cerr << "No module \"" << name << "\" found\n";
-    return;
-  }
-
-  auto& module = module_lu->second;
-
-  module.llvm_module->setDataLayout(ctx.llvm_jit->getDataLayout());
-
-  // Create a ResourceTracker to track JIT'd memory allocated to our
-  // anonymous expression -- that way we can free it after executing.
-  auto RT = ctx.llvm_jit->getMainJITDylib().createResourceTracker();
-
-  auto TSM = llvm::orc::ThreadSafeModule(
-    std::move(module.llvm_module),
-    std::move(ctx.llvm_context)
-  );
-  ctx.modules.erase(ctx.modules.find(name));
-
-  if (auto e = ctx.llvm_jit->addModule(std::move(TSM), RT)) {
-    std::cerr << llvm::toString(std::move(e)) << "\n";
-    return;
-  }
-
-  // Search the JIT for the __anon_expr symbol.
-  auto ExprSymbol = ctx.llvm_jit->lookup("main");
-  if (auto e = ExprSymbol.takeError()) {
-    std::cerr << llvm::toString(std::move(e)) << "\n";
-    return;
-  }
-
-  // Get the symbol's address and cast it to the right type (takes no
-  // arguments, returns a float) so we can call it as a native function.
-  float (*FP)() = ExprSymbol->getAddress().toPtr<float (*)()>();
-  std::cout << "Evaluated to " << FP() << "\n";
-
-  // Delete the anonymous expression module from the JIT.
-  if (auto e = RT->remove()) {
-    std::cerr << llvm::toString(std::move(e)) << "\n";
-  }
 }

@@ -1,0 +1,6 @@
+numerical_types(x: int, y: int): int {
+	z := x + y;
+	w : int = z + y;
+
+	return 1;
+}

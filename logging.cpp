@@ -11,6 +11,7 @@
 static std::string to_string(Errors error) {
   switch (error) {
     case Errors::Syntax:        return "syntax";
+    case Errors::Type  :        return "type";
     default:                    return "unkown";
   }
 }

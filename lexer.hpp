@@ -20,7 +20,6 @@ enum class TokenType : char {
   DoubleEquals, // ==
   DoubleAnd, // &&
   DoublePipe, // ||
-  Walrus, // :=
 
   // printable characters (32-)
   Space = ' ',

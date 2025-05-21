@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lexer.hpp"
+#include "typing.hpp"
 #include "logging.hpp"
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
@@ -20,7 +21,8 @@ enum class ASTNodeType : char {
   Block,
   Module,
 
-  Literal,
+  IntLiteral,
+  FloatLiteral,
   Variable,
   BinaryOperator,
   UnaryOperator,
@@ -41,17 +43,20 @@ auto unique_void(T * ptr) -> unique_void_ptr
     });
 }
 
-struct ASTUnkownData {
-
-};
+struct ASTUnkownData {};
 
 struct ASTExpressionData {
   llvm::Value* llvm_value = nullptr;
+  Type* resolved_type = nullptr;
 };
 
 struct ASTExpressionStatementData {};
 
-struct ASTLiteralData : ASTExpressionData {
+struct ASTIntLiteralData : ASTExpressionData {
+  int value;
+};
+
+struct ASTFloatLiteralData : ASTExpressionData {
   float value;
 };
 
@@ -120,6 +125,8 @@ struct ASTAssignmentData : ASTExpressionData {
 
 struct ASTVariableDefinitionData {
   std::string name;
+  std::string type = ""; // @optional
+  Type* resolved_type = nullptr;
 
   enum class Children {
     Expression = 1,
@@ -136,12 +143,16 @@ struct ASTWhileData {};
 
 struct ArgumentPrototype {
   std::string name;
+  std::string type;
+  Type* resolved_type = nullptr;
   llvm::AllocaInst* llvm_alloca_inst = nullptr;
 };
 
 struct ASTPrototypeData {
   std::string name;
   std::vector<ArgumentPrototype> args;
+  std::string return_type;
+  Type* resolved_return_type = nullptr;
 
   llvm::Function* llvm_function = nullptr;
 };
@@ -151,7 +162,9 @@ struct ASTBlockData {
   llvm::BasicBlock* llvm_bb = nullptr;
 };
 
-struct ASTModuleData {};
+struct ASTModuleData {
+  std::string name;
+};
 
 struct ASTFunctionDefinitionData {
   enum class Children {
@@ -188,8 +201,6 @@ struct ASTNode {
   const T* cast_data() const {
     return (const T*)data.get();
   }
-
-
 };
 
 std::string to_string(const ASTNode& node);
@@ -235,6 +246,6 @@ private:
 
 int last_child(AST& ast, int nodei);
 
-void make_ast(AST& ast, Lexer& lexer, Logger& logger);
+void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger);
 
 void print_ast(const AST& ast);
