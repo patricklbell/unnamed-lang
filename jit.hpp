@@ -83,4 +83,4 @@ private:
 };
 
 struct CompilerContext;
-void jit_run_module(CompilerContext& ctx, std::string& name);
+void jit_run_and_delete_modules(CompilerContext& ctx);

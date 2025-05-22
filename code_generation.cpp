@@ -89,7 +89,7 @@ static llvm::AllocaInst* add_alloca_to_entry_block(llvm::Function* llvm_function
   return tmp_llvm_builder.CreateAlloca(get_llvm_type_for_builtin(llvm_context, type), nullptr, name);
 }
 
-static void visit_td_prototype(ASTNode& node, CGContext& ctx) {
+static void add_global_function_prototype(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT(node.type == ASTNodeType::Prototype);
   ASTPrototypeData* data = node.cast_data<ASTPrototypeData>();
 
@@ -119,8 +119,22 @@ static void visit_td_prototype(ASTNode& node, CGContext& ctx) {
     idx++;
   }
 
-  // record the prototype @note type checking may already create a similar structure
+  // record the prototype
   ctx.function_protos[data->name] = data;
+}
+
+static void visit_td_module(ASTNode& node, CGContext& ctx) {
+  LANG_ASSERT(node.type == ASTNodeType::Module);
+
+  // @note assumes all functions and prototypes are top-level
+  for (auto& child : ASTChildrenIterator(*ctx.ast, node.id)) {
+    if (child.type == ASTNodeType::FunctionDefinition) {
+      static_assert((int)ASTFunctionDefinitionData::Children::Prototype == 1);
+      add_global_function_prototype(ctx.ast->nodes[child.id + 1], ctx);
+    } else if (child.type == ASTNodeType::Prototype) {
+      add_global_function_prototype(child, ctx);
+    }
+  }
 }
 
 static void visit_td_block(ASTNode& node, CGContext& ctx) {
@@ -613,8 +627,8 @@ static void visit_bu(ASTNode& node, CGContext& ctx) {
 
 static void visit_td(ASTNode& node, CGContext& ctx) {
   switch (node.type) {
-    case ASTNodeType::Prototype:
-      return visit_td_prototype(node, ctx);
+    case ASTNodeType::Module:
+      return visit_td_module(node, ctx);
     case ASTNodeType::FunctionDefinition:
       return visit_td_function_definition(node, ctx);
     case ASTNodeType::Block:
@@ -623,7 +637,7 @@ static void visit_td(ASTNode& node, CGContext& ctx) {
       return visit_td_if(node, ctx);
     case ASTNodeType::While:
       return visit_td_while(node, ctx);
-    case ASTNodeType::Module:
+    case ASTNodeType::Prototype:
     case ASTNodeType::Return:
     case ASTNodeType::Assignment:
     case ASTNodeType::ExpressionStatement:
@@ -757,7 +771,7 @@ int emit_object_code(CompilerContext& ctx) {
     llvm_target_options,
     llvm::Reloc::PIC_
   );
-  auto DL = llvm_target_machine->createDataLayout();
+  auto data_layout = llvm_target_machine->createDataLayout();
 
   for (auto& mm : ctx.modules) {
     auto dest_path = mm.first + ".o";
@@ -776,7 +790,7 @@ int emit_object_code(CompilerContext& ctx) {
     module.llvm_module->print(ir_dest, nullptr);
 
     // dump obj
-    module.llvm_module->setDataLayout(DL);
+    module.llvm_module->setDataLayout(data_layout);
     module.llvm_module->setTargetTriple(target_triple);
 
     llvm::raw_fd_ostream dest(dest_path, error_code, llvm::sys::fs::OF_None);

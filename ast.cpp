@@ -763,16 +763,22 @@ static int parse_function_definition(AST& ast, Lexer& lexer, Logger& logger) {
   return nodei;
 }
 
-static bool match_function_prototype(const Lexer& lexer) {
+static bool match_extern_function(const Lexer& lexer) {
   return lexer.peek_type() == TokenType::Extern;
 }
 
-static int parse_function_prototype(AST& ast, Lexer& lexer, Logger& logger) {
+static int parse_extern_function(AST& ast, Lexer& lexer, Logger& logger) {
   if (!expect_token(TokenType::Extern, lexer)) {
     logger.log(Errors::Syntax, "Expected 'extern'.", lexer.peek_span());
   }
 
-  return parse_prototype(ast, lexer, logger);
+  int nodei = parse_prototype(ast, lexer, logger);
+
+  if (!expect_token(TokenType::Semicolon, lexer)) {
+    logger.log(Errors::Syntax, "Expected ';'.", lexer.peek_span());
+  }
+
+  return nodei;
 }
 
 void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger) {
@@ -783,8 +789,8 @@ void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger) 
   while (true) {
     if (match_function_definition(lexer)) {
       add_child(ast, modulei, parse_function_definition(ast, lexer, logger));
-    } else if (match_function_prototype(lexer)) {
-      add_child(ast, modulei, parse_function_prototype(ast, lexer, logger));
+    } else if (match_extern_function(lexer)) {
+      add_child(ast, modulei, parse_extern_function(ast, lexer, logger));
     } else if (lexer.peek_type() == TokenType::Semicolon) {
       lexer.consume_token();
       continue;

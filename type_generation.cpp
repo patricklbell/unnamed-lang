@@ -35,27 +35,34 @@ static FunctionType* resolve_function_type(TypeInfo& types, std::string name, co
   return nullptr;
 }
 
-// @note assumes function defintions are all top level
+// @note assumes function defintions and prototypes are all top level
 static void register_functions_in_module(AST& ast, int modulei, TypeInfo& types, Logger& logger) {
   for (auto& node : ASTChildrenIterator(ast, modulei)) {
+    ASTPrototypeData* prototype_data = nullptr;
+
     if (node.type == ASTNodeType::FunctionDefinition) {
       static_assert((int)ASTFunctionDefinitionData::Children::Prototype == 1);
       ASTNode& prototype = ast.nodes[node.id + 1];
-      ASTPrototypeData* prototype_data = prototype.cast_data<ASTPrototypeData>();
-
-      FunctionType func_type {
-        .name = prototype_data->name,
-        .return_type = resolve_type(types, prototype_data->return_type, prototype.span, logger),
-      };
-      for (auto& arg_prototype : prototype_data->args) {
-        FunctionArgumentType arg {
-          .name = arg_prototype.name,
-          .type = resolve_type(types, arg_prototype.type, prototype.span, logger),
-        };
-        func_type.args.emplace_back(std::move(arg));
-      }
-      types.functions.emplace(prototype_data->name, std::move(func_type));
+      prototype_data = prototype.cast_data<ASTPrototypeData>();
+    } else if (node.type == ASTNodeType::Prototype) {
+      prototype_data = node.cast_data<ASTPrototypeData>();
     }
+
+    if (prototype_data == nullptr)
+      continue;
+
+    FunctionType func_type {
+      .name = prototype_data->name,
+      .return_type = resolve_type(types, prototype_data->return_type, node.span, logger),
+    };
+    for (auto& arg_prototype : prototype_data->args) {
+      FunctionArgumentType arg {
+        .name = arg_prototype.name,
+        .type = resolve_type(types, arg_prototype.type, node.span, logger),
+      };
+      func_type.args.emplace_back(std::move(arg));
+    }
+    types.functions.emplace(prototype_data->name, std::move(func_type));
   }
 }
 
@@ -108,6 +115,9 @@ static Type* infer_expression_type_impl(AST& ast, ASTNode& node, TypeInfo& types
   {
     ASTCallData* data = node.cast_data<ASTCallData>();
     FunctionType* ft = resolve_function_type(types, data->name, node.span, logger);
+
+    if (ft == nullptr)
+      return nullptr;
 
     std::vector<Type*> args;
     add_subexpression_types(args, ast, node, types, scopes, logger);
@@ -191,15 +201,18 @@ static void infer_local_types(AST& ast, TypeInfo& types, Logger& logger) {
       ASTPrototypeData* prototype_data = node.cast_data<ASTPrototypeData>();
       
       FunctionType* ft = resolve_function_type(types, prototype_data->name, node.span, logger);
-      prototype_data->resolved_return_type = ft->return_type;
 
-      LANG_ASSERT(ft->args.size() == prototype_data->args.size());
-      for (int i = 0; i < ft->args.size(); ++i) {
-        auto& arg = ft->args[i];
-        auto& proto_arg = prototype_data->args[i];
-
-        prototype_scope->locals.emplace(arg.name, arg.type);
-        proto_arg.resolved_type = arg.type;
+      if (ft != nullptr) {
+        prototype_data->resolved_return_type = ft->return_type;
+  
+        LANG_ASSERT(ft->args.size() == prototype_data->args.size());
+        for (int i = 0; i < ft->args.size(); ++i) {
+          auto& arg = ft->args[i];
+          auto& proto_arg = prototype_data->args[i];
+  
+          prototype_scope->locals.emplace(arg.name, arg.type);
+          proto_arg.resolved_type = arg.type;
+        }
       }
 
       scopes.push_back(prototype_scope);

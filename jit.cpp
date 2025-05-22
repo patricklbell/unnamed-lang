@@ -8,53 +8,51 @@
 #define DLLEXPORT
 #endif
 
-/// putcharf - putchar that takes a float and returns 0.
-extern "C" DLLEXPORT float putcharf(float X) {
+extern "C" DLLEXPORT int putchar(int X) {
   fputc((char)X, stderr);
   return 0;
 }
 
-void jit_run_module(CompilerContext& ctx, std::string& name) {
-    auto module_lu = ctx.modules.find(name);
-    if (module_lu == ctx.modules.end()) {
-      std::cerr << "No module \"" << name << "\" found\n";
-      return;
-    }
-  
-    auto& module = module_lu->second;
-  
+void jit_run_and_delete_modules(CompilerContext& ctx) {  
+  // create a ResourceTracker to track JIT'd memory allocated
+  auto resource_tracker = ctx.llvm_jit->getMainJITDylib().createResourceTracker();
+
+  bool error_adding_module = false;
+  for (auto& mm : ctx.modules) {
+    auto& module = mm.second;
+
     module.llvm_module->setDataLayout(ctx.llvm_jit->getDataLayout());
-  
-    // Create a ResourceTracker to track JIT'd memory allocated to our
-    // anonymous expression -- that way we can free it after executing.
-    auto RT = ctx.llvm_jit->getMainJITDylib().createResourceTracker();
-  
-    auto TSM = llvm::orc::ThreadSafeModule(
+
+    auto orc_module = llvm::orc::ThreadSafeModule(
       std::move(module.llvm_module),
       std::move(ctx.llvm_context)
     );
-    ctx.modules.erase(ctx.modules.find(name));
-  
-    if (auto e = ctx.llvm_jit->addModule(std::move(TSM), RT)) {
+
+    if (auto e = ctx.llvm_jit->addModule(std::move(orc_module), resource_tracker)) {
       std::cerr << llvm::toString(std::move(e)) << "\n";
-      return;
-    }
-  
-    // Search the JIT for the __anon_expr symbol.
-    auto ExprSymbol = ctx.llvm_jit->lookup("main");
-    if (auto e = ExprSymbol.takeError()) {
-      std::cerr << llvm::toString(std::move(e)) << "\n";
-      return;
-    }
-  
-    // Get the symbol's address and cast it to the right type (takes no
-    // arguments, returns a float) so we can call it as a native function.
-    float (*FP)() = ExprSymbol->getAddress().toPtr<float (*)()>();
-    std::cout << "Evaluated to " << FP() << "\n";
-  
-    // Delete the anonymous expression module from the JIT.
-    if (auto e = RT->remove()) {
-      std::cerr << llvm::toString(std::move(e)) << "\n";
+      error_adding_module = true;
     }
   }
+  // make sure unique pointers aren't reused
+  ctx.modules.clear();
+
+  if (!error_adding_module) {
+    // search the JIT for the main symbol.
+    auto main_symbol = ctx.llvm_jit->lookup("main");
+    if (auto e = main_symbol.takeError()) {
+      std::cerr << llvm::toString(std::move(e)) << "\n";
+    } else {
+      // get main symbol's address and cast it to the right type so we can call it as a native function.
+      int (*main_fptr)() = main_symbol->getAddress().toPtr<int (*)()>();
+      int exit_code = main_fptr();
+    
+      std::cout << "JIT exited with code " << exit_code << "\n";
+    }
+  }
+
+  // clear resources tracked by JIT
+  if (auto e = resource_tracker->remove()) {
+    std::cerr << llvm::toString(std::move(e)) << "\n";
+  }
+}
   

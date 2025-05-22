@@ -16,6 +16,15 @@
 #include "code_generation.hpp"
 #include "type_generation.hpp"
 
+static int link_object_files_to_executable(const CompilerContext& ctx, const std::string& out) {
+  std::string cmd = "cc";
+  for (auto& mm : ctx.modules) {
+    cmd += " " + mm.first + ".o";
+  }
+  cmd += " -o " + out;
+  return system(cmd.c_str());
+}
+
 static std::string_view strip_file_extension(std::string_view in) {
   size_t lastindex = in.find_last_of("."); 
   return in.substr(0, lastindex); 
@@ -35,55 +44,67 @@ static std::string help_message() {
 }
 
 struct ConsoleOptions {
-  bool print_ast  = false;
-  bool no_emit    = false;
-  bool jit        = false;
+  bool print_ast = false;
+  bool no_emit   = false;
+  bool jit       = false;
+
+  std::vector<std::string> source_files;
+  std::string emit_executable_path = "a.out";
 };
 
-int main(int argc, char** argv) {
-  if (argc <= 1) {
-    std::cerr << "No input files, exiting " + usage_message(argc, argv) + ".\n";
-    return 1;
-  }
-  
-  ConsoleOptions options;
+static void parse_command_line_options(int argc, char** argv, ConsoleOptions& options) {
   for (int i = 1; i < argc; ++i) {
     auto arg = std::string(argv[i]);
-    if (arg.rfind("--", 0) != 0)
+    if (arg.rfind("-", 0) != 0) {
+      options.source_files.emplace_back(arg);
       continue;
+    }
 
-    if (arg == "--help")
+    if (arg == "--help") {
       std::cout << help_message();
-    if (arg == "--ast")
+    } else if (arg == "--ast") {
       options.print_ast = true;
-    if (arg == "--no-emit")
+    } else if (arg == "--no-emit") {
       options.no_emit = true;
-    if (arg == "--jit")
+    } else if (arg == "--jit") {
       options.jit = true;
+    } else if (arg == "-o") {
+      if (i + 1 < argc) {
+        std::cerr << "Expected output name after -o, " << usage_message(argc, argv) << ".\n";
+      } else {
+        i++;
+        options.emit_executable_path = std::string(argv[i]);
+      }
+    } else {
+      std::cerr << "Unexpected argument \"" + arg + "\", " << usage_message(argc, argv);
+    }
+  }
+}
+
+int main(int argc, char** argv) {  
+  ConsoleOptions opts;
+  parse_command_line_options(argc, argv, opts);
+  
+  if (opts.source_files.empty()) {
+    std::cerr << "No source files, " << usage_message(argc, argv) << ".\n";
+    return 1;
   }
 
   // logging and tracking for files
   FileManager fm;
   ConsoleLogger logger;
   
-  // parse all source file provided
+  // parse each source file
   // @todo build ast as needed
   AST ast;
-  std::vector<std::string> module_names;
-  for (int i = 1; i < argc; ++i) {
-    auto path = std::string(argv[i]);
-    if (path.rfind("--", 0) == 0)
-      continue;
-      
-    auto& module_name = module_names.emplace_back(strip_file_extension(path));
-
+  for (const auto& path : opts.source_files) {
     Reader source(path);
     Lexer lexer(source, fm.add(path));
 
-    parse_module_ast(ast, module_name, lexer, logger);
+    parse_module_ast(ast, std::string(strip_file_extension(path)), lexer, logger);
   }
 
-  if (options.print_ast)
+  if (opts.print_ast)
     print_ast(ast);
 
   // early exit if parsing failed
@@ -93,25 +114,27 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // generate and check type information
   TypeInfo type_info;
   typegen(ast, type_info, logger);
 
-  // print warnings etc.
   bool failed = logger.is_error();
   logger.commit(fm);
   if (failed)
     return 1;
 
+  // create llvm code
   CompilerContext context;
   codegen(ast, context, type_info);
 
-  if (options.jit) {
-    for (auto &module_name : module_names) {
-      jit_run_module(context, module_name);
-    }
+  // compile modules to object files and executable
+  if (!opts.no_emit) {
+    emit_object_code(context) || 
+    link_object_files_to_executable(context, opts.emit_executable_path);
   }
 
-  // compile modules to object files
-  if (!options.no_emit)
-    return emit_object_code(context);
+  // @note deletes modules
+  if (opts.jit) {
+    jit_run_and_delete_modules(context);
+  }
 }
