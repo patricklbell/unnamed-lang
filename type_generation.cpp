@@ -12,15 +12,22 @@ static Type* resolve_type(TypeInfo& types, std::string type_name, const TextSpan
   return nullptr;
 }
 
-static Type* resolve_variable_type(const std::vector<ScopeTypeInfo*>& scopes, std::string name, const TextSpan& span, Logger& logger) {
+static Type* find_variable_type_from_scopes(const std::vector<ScopeTypeInfo*>& scopes, std::string name) {
   for (auto& scope : scopes) {
     auto lu = scope->locals.find(name);
     if (lu != scope->locals.end())
       return lu->second;
   }
-  
-  logger.log(Errors::Type, "Undefined variable \"" + name + "\".", span);
+
   return nullptr;
+}
+
+static Type* resolve_variable_type(const std::vector<ScopeTypeInfo*>& scopes, std::string name, const TextSpan& span, Logger& logger) {
+  Type* t = find_variable_type_from_scopes(scopes, name);
+  if (t == nullptr)
+    logger.log(Errors::Type, "Undefined variable \"" + name + "\".", span);
+
+  return t;
 }
 
 // @todo overloading
@@ -55,11 +62,14 @@ static void register_functions_in_module(AST& ast, int modulei, TypeInfo& types,
       .name = prototype_data->name,
       .return_type = resolve_type(types, prototype_data->return_type, node.span, logger),
     };
+    prototype_data->resolved_return_type = func_type.return_type;
+
     for (auto& arg_prototype : prototype_data->args) {
       FunctionArgumentType arg {
         .name = arg_prototype.name,
         .type = resolve_type(types, arg_prototype.type, node.span, logger),
       };
+      arg_prototype.resolved_type = arg.type;
       func_type.args.emplace_back(std::move(arg));
     }
     types.functions.emplace(prototype_data->name, std::move(func_type));
@@ -186,52 +196,90 @@ static void infer_variable_type(AST& ast, ASTNode& variable, TypeInfo& types, co
   variable_data->resolved_type = conditioned_t;
 }
 
-static void infer_local_types(AST& ast, TypeInfo& types, Logger& logger) {
-  std::vector<ScopeTypeInfo*> scopes;
-
-  for (int node_id = 0; node_id < ast.nodes.size();) {
+static void infer_local_types_impl(AST& ast, int start_node_id, int size, TypeInfo& types, std::vector<ScopeTypeInfo*> &scopes, Logger& logger) {
+  for (int node_id = start_node_id; node_id < start_node_id + size;) {
     auto& node = ast.nodes[node_id];
 
     switch (node.type)
     {
-    case ASTNodeType::Prototype:
+    case ASTNodeType::FunctionDefinition:
     {
-      ScopeTypeInfo* prototype_scope = make_scope(types, node_id);
-      
-      ASTPrototypeData* prototype_data = node.cast_data<ASTPrototypeData>();
-      
-      FunctionType* ft = resolve_function_type(types, prototype_data->name, node.span, logger);
+      auto& prototype = ast.nodes[node.id + 1];
+      static_assert((int)ASTFunctionDefinitionData::Children::Prototype == 1);
+      LANG_ASSERT(prototype.type == ASTNodeType::Prototype);
+      ASTPrototypeData* prototype_data = prototype.cast_data<ASTPrototypeData>();
 
+      auto& body = ast.nodes[prototype.id + prototype.size];
+      static_assert((int)ASTFunctionDefinitionData::Children::Body == 2);
+      LANG_ASSERT(body.type == ASTNodeType::Block);
+
+      ScopeTypeInfo* function_scope = make_scope(types, body.id);
+
+      const FunctionType* ft = resolve_function_type(types, prototype_data->name, node.span, logger);
       if (ft != nullptr) {
-        prototype_data->resolved_return_type = ft->return_type;
-  
         LANG_ASSERT(ft->args.size() == prototype_data->args.size());
         for (int i = 0; i < ft->args.size(); ++i) {
           auto& arg = ft->args[i];
           auto& proto_arg = prototype_data->args[i];
   
-          prototype_scope->locals.emplace(arg.name, arg.type);
-          proto_arg.resolved_type = arg.type;
+          function_scope->locals.emplace(arg.name, arg.type);
         }
       }
 
-      scopes.push_back(prototype_scope);
+      scopes.push_back(function_scope);
+      infer_local_types_impl(ast, body.id + 1, body.size - 1, types, scopes, logger);
+      node_id += node.size;
+      scopes.pop_back();
+
       break;
     }
     case ASTNodeType::Block:
     {
       scopes.push_back(make_scope(types, node_id));
+      infer_local_types_impl(ast, node.id + 1, node.size - 1, types, scopes, logger);
+      node_id += node.size;
+      scopes.pop_back();
+
       break;
     }
     case ASTNodeType::VariableDefinition:
     {
+      LANG_ASSERT(node.type == ASTNodeType::VariableDefinition);
+      ASTVariableDefinitionData* data = node.cast_data<ASTVariableDefinitionData>();
+
       if (scopes.empty()) {
-        logger.log(Errors::Syntax, "Variable definition outside a block.", node.span);
-      } else {
-        infer_variable_type(ast, node, types, scopes, logger);
+        logger.log(Errors::Syntax, "Cannot declare a variable outside a block.", node.span);
+      }
+      if (find_variable_type_from_scopes(scopes, data->name) != nullptr) {
+        // @todo show where previously defined
+        logger.log(Errors::Type, data->name + " has already been declared.", node.span);
+      }
+      
+      infer_variable_type(ast, node, types, scopes, logger);
+
+      // @note skips recursing into variable definition
+      node_id += node.size;
+      continue;
+    }
+    case ASTNodeType::Assignment:
+    {
+      LANG_ASSERT(node.type == ASTNodeType::Assignment);
+      ASTAssignmentData* data = node.cast_data<ASTAssignmentData>();
+
+      Type* variable_t = find_variable_type_from_scopes(scopes, data->name);
+      if (variable_t == nullptr) {
+        logger.log(Errors::Type, data->name + " is undefined.", node.span);
       }
 
-      // @note skips recursing into expressions
+      // @note inference also performs consistency checks
+      static_assert((int)ASTAssignmentData::Children::Expression == 1);
+      Type* inferred_t = infer_expression_type(ast, ast.nodes[node.id + 1], types, scopes, logger);
+
+      if (variable_t != nullptr && inferred_t != nullptr && variable_t != inferred_t) {
+        logger.log(Errors::Type, "Cannot assign " + inferred_t->name + " to " + variable_t->name, node.span);
+      }
+
+      // @note skips recursing into assignment
       node_id += node.size;
       continue;
     }
@@ -256,6 +304,11 @@ static void infer_local_types(AST& ast, TypeInfo& types, Logger& logger) {
     // depth first search, top to bottom
     node_id += 1;
   }
+}
+
+static void infer_local_types(AST& ast, TypeInfo& types, Logger& logger) {
+  std::vector<ScopeTypeInfo*> scopes;
+  infer_local_types_impl(ast, 0, ast.nodes.size(), types, scopes, logger);
 }
 
 void typegen(AST& ast, TypeInfo& types, Logger& logger) {
