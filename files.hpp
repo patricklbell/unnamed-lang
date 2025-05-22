@@ -40,6 +40,7 @@ public:
   Reader(const std::string& path);
 
   bool eof();
+  bool error();
   char consume_char();
   char peek_char();
 

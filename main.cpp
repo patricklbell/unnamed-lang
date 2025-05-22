@@ -31,16 +31,17 @@ static std::string_view strip_file_extension(std::string_view in) {
 }
 
 static std::string usage_message(int argc, char** argv) {
-  if (argc > 0)
-    return "\"" + std::string(argv[0]) + " --help\" for help";
-  return "\"langc --help\" for help";
+  return "run \"" + (argc > 0 ? std::string(argv[0]) : "langc") + " --help\" for help";
 }
 
-static std::string help_message() {
-  return "--help      : Print this help message\n"
-         "--ast       : Print the ast after parsing\n"
-         "--no-emit   : Do not emit object code\n"
-         "--jit       : Run modules just-in-time in the order provided\n";
+static std::string help_message(int argc, char** argv) {
+  return "Usage: " + (argc > 0 ? std::string(argv[0]) : "langc") + " [options] file...\n"
+         "Options:\n"
+         "  --help        Print this help message.\n"
+         "  --ast         Print the ast after parsing.\n"
+         "  --no-emit     Do not emit object code.\n"
+         "  --jit         Run modules just-in-time in the order provided.\n";
+         "  -o <file>     Output executable into <file>.\n";
 }
 
 struct ConsoleOptions {
@@ -52,7 +53,9 @@ struct ConsoleOptions {
   std::string emit_executable_path = "a.out";
 };
 
-static void parse_command_line_options(int argc, char** argv, ConsoleOptions& options) {
+static bool parse_command_line_options(int argc, char** argv, ConsoleOptions& options) {
+  bool error_occurred = false;
+  bool print_help = false;
   for (int i = 1; i < argc; ++i) {
     auto arg = std::string(argv[i]);
     if (arg.rfind("-", 0) != 0) {
@@ -61,7 +64,7 @@ static void parse_command_line_options(int argc, char** argv, ConsoleOptions& op
     }
 
     if (arg == "--help") {
-      std::cout << help_message();
+      print_help = true;
     } else if (arg == "--ast") {
       options.print_ast = true;
     } else if (arg == "--no-emit") {
@@ -71,23 +74,33 @@ static void parse_command_line_options(int argc, char** argv, ConsoleOptions& op
     } else if (arg == "-o") {
       if (i + 1 < argc) {
         std::cerr << "Expected output name after -o, " << usage_message(argc, argv) << ".\n";
+        error_occurred = true;
       } else {
         i++;
         options.emit_executable_path = std::string(argv[i]);
       }
     } else {
-      std::cerr << "Unexpected argument \"" + arg + "\", " << usage_message(argc, argv);
+      std::cerr << "Unexpected argument \"" + arg + "\", " << usage_message(argc, argv) << ".\n";
+      error_occurred = true;
     }
   }
+
+  if (print_help) {
+    std::cout << help_message(argc, argv);
+    exit(0);
+  }
+
+  return !error_occurred;
 }
 
 int main(int argc, char** argv) {  
   ConsoleOptions opts;
-  parse_command_line_options(argc, argv, opts);
+  if (!parse_command_line_options(argc, argv, opts))
+    return 1;
   
   if (opts.source_files.empty()) {
     std::cerr << "No source files, " << usage_message(argc, argv) << ".\n";
-    return 1;
+    return 0;
   }
 
   // logging and tracking for files
@@ -96,12 +109,25 @@ int main(int argc, char** argv) {
   
   // parse each source file
   // @todo build ast as needed
+  bool failed_to_read = false;
   AST ast;
   for (const auto& path : opts.source_files) {
     Reader source(path);
-    Lexer lexer(source, fm.add(path));
+    if (source.error()) {
+      std::cerr << "Failed to read \"" << path << "\".\n";
+      failed_to_read = true;
+    }
+    // don't bother processing if any files are missing
+    if (failed_to_read) {
+      continue;
+    }
 
+    Lexer lexer(source, fm.add(path));
     parse_module_ast(ast, std::string(strip_file_extension(path)), lexer, logger);
+  }
+  if (failed_to_read) {
+    std::cerr << "One of more files could not be read, exiting.\n";
+    return 1;
   }
 
   if (opts.print_ast)

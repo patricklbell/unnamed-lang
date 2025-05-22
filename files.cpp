@@ -59,6 +59,10 @@ Reader::~Reader() {
   fd = nullptr;
 }
 
+bool Reader::error() {
+  return fd == nullptr;
+}
+
 bool Reader::eof() {
   return fd == nullptr || lc == EOF;
 }
