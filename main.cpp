@@ -40,7 +40,7 @@ static std::string help_message(int argc, char** argv) {
          "  --help        Print this help message.\n"
          "  --ast         Print the ast after parsing.\n"
          "  --no-emit     Do not emit object code.\n"
-         "  --jit         Run modules just-in-time in the order provided.\n";
+         "  --jit         Run modules just-in-time in the order provided.\n"
          "  -o <file>     Output executable into <file>.\n";
 }
 
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
     parse_module_ast(ast, std::string(strip_file_extension(path)), lexer, logger);
   }
   if (failed_to_read) {
-    std::cerr << "One of more files could not be read, exiting.\n";
+    std::cerr << "One or more files could not be read, exiting.\n";
     return 1;
   }
 
