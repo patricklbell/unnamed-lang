@@ -70,6 +70,7 @@ static llvm::Function* get_function(std::string name, const CGContext& ctx) {
 }
 
 static llvm::Type* get_llvm_type_for_builtin(llvm::LLVMContext* llvm_context, Type* type) {
+  LANG_ASSERT(type != nullptr, "unresolved type encountered during code generation");
   switch (type->form) {
     case Type::Form::Float:
       return llvm::Type::getFloatTy(*llvm_context);
@@ -141,7 +142,10 @@ static void visit_td_block(ASTNode& node, CGContext& ctx) {
   LANG_ASSERT(node.type == ASTNodeType::Block);
   ASTBlockData* data = node.cast_data<ASTBlockData>();
 
-  LANG_ASSERT(ctx.llvm_function != nullptr, "Block must exist inside a function");
+  if (data->dont_create_basic_block)
+    return;
+
+  LANG_ASSERT(ctx.llvm_function != nullptr, "Basic block must exist inside a function");
 
   if (data->llvm_bb == nullptr)
     data->llvm_bb = llvm::BasicBlock::Create(*ctx.llvm_context);

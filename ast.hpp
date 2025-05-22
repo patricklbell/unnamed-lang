@@ -160,6 +160,7 @@ struct ASTPrototypeData {
 struct ASTBlockData {
   std::string llvm_bb_name = "block";
   llvm::BasicBlock* llvm_bb = nullptr;
+  bool dont_create_basic_block = false;
 };
 
 struct ASTModuleData {

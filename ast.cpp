@@ -178,7 +178,8 @@ static bool not_end(Lexer& lexer, Logger& logger, AST& ast, int nodei, std::stri
 
 // Parsing
 static void parse_expression_add_child(AST& ast, Lexer& lexer, Logger& logger, int parenti, int parent_precedence = -1, bool in_parenthesis = false, bool in_comma_list = false);
-static int parse_block(AST& ast, Lexer& lexer, Logger& logger);
+static bool match_block(const Lexer& lexer);
+static int parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block = false);
 
 static bool match_end_expression(const Lexer& lexer, bool in_parenthesis = false, bool in_comma_list = false) {
   return (
@@ -622,6 +623,8 @@ static int parse_statement(AST& ast, Lexer& lexer, Logger& logger) {
     return parse_if(ast, lexer, logger);
   } else if (match_while(lexer)) {
     return parse_while(ast, lexer, logger);
+  } else if (match_block(lexer)) {
+    return parse_block(ast, lexer, logger, true);
   }
 
   int nodei;
@@ -727,8 +730,15 @@ static int parse_prototype(AST& ast, Lexer& lexer, Logger& logger) {
   return nodei;
 }
 
-static int parse_block(AST& ast, Lexer& lexer, Logger& logger) {
+static bool match_block(const Lexer& lexer) {
+  return lexer.peek_type() == TokenType::LeftBrace;
+}
+
+static int parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block) {
   int nodei = make_node(ast, ASTNodeType::Block, lexer);
+
+  ASTBlockData* data = ast.nodes[nodei].cast_data<ASTBlockData>();
+  data->dont_create_basic_block = dont_create_basic_block;
 
   if (!expect_token(ast.nodes[nodei], TokenType::LeftBrace, lexer))
     logger.log(Errors::Syntax, "Expected '{' to start code block.", lexer.peek_span());
