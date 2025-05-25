@@ -250,3 +250,7 @@ int last_child(AST& ast, int nodei);
 void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger);
 
 void print_ast(const AST& ast);
+
+void add_child(AST& ast, int parent, int child);
+
+int make_parent(AST& ast, ASTNodeType type, int child);
