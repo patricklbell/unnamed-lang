@@ -12,7 +12,7 @@
 
 #include "logging.hpp"
 #include "lexer.hpp"
-#include "ast.hpp"
+#include "parse.hpp"
 #include "code_generation.hpp"
 #include "type_generation.hpp"
 
@@ -140,27 +140,27 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // generate and check type information
-  TypeInfo type_info;
-  typegen(ast, type_info, logger);
+  // // generate and check type information
+  // TypeInfo type_info;
+  // typegen(ast, type_info, logger);
 
-  bool failed = logger.is_error();
-  logger.commit(fm);
-  if (failed)
-    return 1;
+  // bool failed = logger.is_error();
+  // logger.commit(fm);
+  // if (failed)
+  //   return 1;
 
-  // create llvm code
-  CompilerContext context;
-  codegen(ast, context, type_info);
+  // // create llvm code
+  // CompilerContext context;
+  // codegen(ast, context, type_info);
 
-  // compile modules to object files and executable
-  if (!opts.no_emit) {
-    emit_object_code(context) || 
-    link_object_files_to_executable(context, opts.emit_executable_path);
-  }
+  // // compile modules to object files and executable
+  // if (!opts.no_emit) {
+  //   emit_object_code(context) || 
+  //   link_object_files_to_executable(context, opts.emit_executable_path);
+  // }
 
-  // @note deletes modules
-  if (opts.jit) {
-    jit_run_and_delete_modules(context);
-  }
+  // // @note deletes modules
+  // if (opts.jit) {
+  //   jit_run_and_delete_modules(context);
+  // }
 }

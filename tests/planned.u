@@ -1,0 +1,271 @@
+// structure, enum and union types
+Node : struct {
+	type : NodeType,
+};
+
+BinaryNode : struct {
+	...Node,
+	lhs	: ptr[Node],
+	rhs	: ptr[Node],
+};
+
+ValueNode : struct {
+	...Node,
+	value : Value,
+};
+
+NodeType : enum[int] {
+	PLUS = 0,
+	MINUS,
+	TIMES,
+	DIVIDE,
+	VALUE,
+};
+
+Value : union {
+    f : float,
+    i : int,
+};
+
+// builtin types
+A : ptr;
+B : buffer[int, #10];
+
+// later we can define pointer types with generic types and overloading
+ptr[x] : ptr;
+/*ptr[x] + int : (l: ptr[x], r: int) -> ptr[x] = {
+    size := #type[x]().size;    // # means calculate at compile time
+	return ptr + size*r;        // we need to use size at run-time so don't # it
+}*/
+
+print_node : (node: ptr[Node]) -> void = {
+	if node->type == NodeType.PLUS {
+        print("plus");
+    } else if node->type == NodeType.MINUS {
+		print("minus");
+	}
+}
+
+// generic function
+add_value[Key, Value] : (map: HashMap[Key, Value], key: Key, value: Value) -> void = {
+}
+
+// generic types
+vec[ct: Numericals, num: int = #3] : type[#create_vec_type[ct](num)];
+
+create_vec_type[ct] : (ct: Type, num: int) -> StructType = {
+	t := struct StructType {};
+
+	i := 0;
+	components := "xyzw";
+	while i < num {
+		add_value(t.members, make_string(components[i]), type[ct]());
+	}
+
+	return t;
+}
+
+vec3[ct : Numericals = float] : vec[ct];
+vec4[ct : Numericals = float] : vec[ct, #4];
+vec2[ct : Numericals = float] : vec[ct, #2];
+
+// meta-types
+//Numericals : [int, float, NodeType]; // enum is redundant here since it reduces to an int
+//ComposesNode : [Node]; // cannot mix struct and primitive / enum types
+
+// operator overloading
+/*vec3[x] + vec3[y] : (l: vec3[x], r: vec3[y]) -> vec3[x] = {
+	return vec3[x]{
+		x = l.x + r.x,
+		y = l.y + r.y,
+		z = l.z + r.z,
+	}
+}*/
+
+// example 1:
+// rtti (run time type information)
+//Structs : [struct];
+RTTI[t: Structs] : type[#add_rtti_to_type(t)];
+
+add_rtti_to_type : (type: Type) -> Type = {
+    if (!in_map(types.members, "rtti")) {
+        add_value(type.members, "rtti", type[Type]());
+        add_value(type.default_values, "rtti", allocate(type));
+    } else {
+        *get_value(type.default_values, "rtti") = type;
+    }
+}
+
+Entity : RTTI[struct {
+    id          : int,
+    position    : vec3,
+    rotation    : vec4,
+}];
+
+Static : RTTI[struct {
+    ...Entity,
+}];
+
+Actor : RTTI[struct {
+    ...Entity,
+    health  : int,
+}];
+
+Player : RTTI[struct {
+    ...Actor,
+    unlocks : int,
+}];
+
+// example 2:
+// rust-style optional
+Optional[x] : ptr[x];
+ResolvedOptional[x] : Exclude[Optional[x], type[#nullptr]];
+
+// disallow implicit and explicit casting
+/*(y)Optional[x] : (this: Optional[x]) -> ptr[x] = {
+    #assert(false);
+}
+
+// allow casting for the resolved type
+(y)ResolvedOptional[x] : (this: Optional[x]) -> ptr[x] = {
+    return (ptr[x])this;
+}*/
+
+example_function : (x: int) -> Optional[int] = {
+    if (x == 1) {
+        return nullptr;
+    }
+    return allocate(2);
+}
+
+test_example_function : () -> void = {
+    res := example_function();
+
+    // can't do:
+    // print(*res);
+    // (ptr[x])res;
+    // pass_as_raw_pointer(res);
+
+    if (res != nullptr) {
+        // now valid as the type has narrowed
+        print(*res);
+    }
+}
+
+// example 3:
+// struct-based optional
+Check[x] : struct {
+    error   : string,
+    res     : x,
+};
+
+ResolvedCheck[x] : struct {
+    ...Check[x],
+    error := "",
+};
+
+get_member_type[t] : (name: string) -> Type = {
+    return get_member(type[t]().members, name);
+}
+
+/*Check[x].y : (this: Check[x]) -> type[#get_member_type[Check[x]](y)] = {
+    #assert(y != "res");
+    return this.y;
+}
+
+ResolvedCheck[x].y : (this: ResolvedCheck[x]) -> Check[x].[y] = {
+    // note that inside overloads, all user-overloads are ignored
+    return this.y;
+}*/
+
+function_to_check : () -> Check[int] = {
+    return struct Check[int] {
+        error   = "",
+        res     = 314,
+    };
+}
+
+test_check : () -> void = {
+    some_result := function_to_check();
+
+    // can't do:
+    // print(some_result.res);
+
+    if (some_result.error != "") {
+        print(some_result.res);
+    }
+}
+
+// example 4:
+// constructor and destructor
+
+// @module, @private, @scoped, etc...?
+File : struct {
+    unix_file_pointer : ptr,
+};
+
+// destructor
+/*~File : (file: File) -> void = {
+    if (file.unix_file_pointer != nullptr) {
+        fclose(file.unix_file_pointer);
+    }
+}*/
+
+// constructor, combined with limiting File
+// access (eg. @private) this is equiv. but
+// with you can also return errors.
+open_file : (name: string) -> Check[File] = {
+    file := struct File {
+        unix_file_pointer = fopen(name),
+    };
+
+    if (file.unix_file_pointer == nullptr) {
+        return struct Check[File] {
+            res     = file,
+            error   = "failed to open",
+        };
+    }
+
+    return struct Check[File] {
+        res = file,
+    };
+}
+
+// example 5:
+// "polymorphism"
+Furniture : struct {
+    sit : ptr[(this: ptr[this]) -> void],
+};
+
+Table : struct {
+    // "this" is replaced with the current struct's type when spread
+    ...Furniture,
+    // set default value without changing type
+    sit     := &sit_on_table,
+    message : string = "That's an antique",
+};
+
+Chair : struct {
+    ...Furniture,
+    sit  := &sit_on_chair,
+    legs : int,
+};
+
+sit_on_table : (table: ptr[Table]) -> void = {
+    print(table->message);
+}
+
+sit_on_chair : (chair: ptr[Chair]) -> void = {
+    print(chair->legs);
+}
+
+test_polymorphism : () -> void = {
+    new_table := struct Table {
+        message = "He loved sitting on it",
+    };
+
+    ptr_to_furniture : ptr[Furniture] = &new_table;
+
+    // should print "He loved sitting on it"
+    (*(ptr_to_furniture->sit))();
+}

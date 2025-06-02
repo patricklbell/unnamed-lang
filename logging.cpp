@@ -19,7 +19,7 @@ static std::string to_string(Errors error) {
 void ConsoleLogger::log(Errors error, const std::string& message, TextSpan span) {
   LANG_ASSERT(span.start.pos <= span.end.pos);
   LANG_ASSERT(span.start.line <= span.end.line);
-  LANG_ASSERT(span.start.column <= span.end.column);
+  LANG_ASSERT(span.start.line != span.end.line || span.start.column <= span.end.column);
 
   messages.emplace_back(
     LogMessage{

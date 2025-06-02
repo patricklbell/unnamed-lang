@@ -1,4 +1,4 @@
-fibonacci(x: int): int {
+fibonacci: (x: int) -> int = {
 	if x <= 0 {
 		return 0;
 	}
@@ -9,20 +9,18 @@ fibonacci(x: int): int {
 	return fibonacci(x - 1) + fibonacci(x - 2);
 }
 
-main(): int {
+main: () -> int = {
 	print_alphabet();
 	return 0;
 }
 
-extern putchar(c: int): int;
+putchar: (c: int) -> int;
 
-print_alphabet(): int {
+print_alphabet: () -> void = {
 	i := 97;
 	while i <= 122 {
 		putchar(i);
-		i = i + 1;
+		*i = i + 1;
 	}
 	putchar(10);
-	
-	return 0;
 }

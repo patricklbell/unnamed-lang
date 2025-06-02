@@ -47,6 +47,18 @@ public:
   TextLocation get_peek_location();
   TextLocation get_consumed_location();
 
+  struct State {
+    int64_t file_position;
+    int clin;
+    int ccol;
+    int lin;
+    int col;
+    int pos;
+    char lc;
+  };
+  State save();
+  void restore(const State& state);
+
 private:
   int clin = 0;
   int ccol = 0;

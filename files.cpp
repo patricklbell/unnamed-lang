@@ -87,6 +87,30 @@ char Reader::peek_char() {
   return lc;
 }
 
+Reader::State Reader::save() {
+  LANG_ASSERT(fd != nullptr, "Cannot save error state");
+
+  return State {
+    .file_position = ftell(fd),
+    .clin = clin,
+    .ccol = ccol,
+    .lin = lin,
+    .col = col,
+    .pos = pos,
+    .lc = lc,
+  };
+}
+
+void Reader::restore(const State& state) {
+  fseek(fd, state.file_position, SEEK_SET);
+  this->clin = state.clin;
+  this->ccol = state.ccol;
+  this->lin = state.lin;
+  this->col = state.col;
+  this->pos = state.pos;
+  this->lc = state.lc;
+}
+
 TextLocation Reader::get_consumed_location() {
   return TextLocation{ .line = clin, .column = ccol, .pos = pos - 1 };
 }
