@@ -4,340 +4,324 @@
 #include "lexer.hpp"
 #include "logging.hpp"
 
-static int parse_type_alias(AST& ast, Lexer& lexer, Logger& logger);
-static int parse_struct_type(AST& ast, Lexer& lexer, Logger& logger);
-static int parse_enum_type(AST& ast, Lexer& lexer, Logger& logger);
-static int parse_union_type(AST& ast, Lexer& lexer, Logger& logger);
-static int parse_function_type(AST& ast, Lexer& lexer, Logger& logger);
+static GenericOrBuiltinType* parse_type_alias(AST& ast, Lexer& lexer, Logger& logger);
+static StructDefinition* parse_struct_type(AST& ast, Lexer& lexer, Logger& logger);
+static EnumDefinition* parse_enum_type(AST& ast, Lexer& lexer, Logger& logger);
+static UnionDefinition* parse_union_type(AST& ast, Lexer& lexer, Logger& logger);
+static FunctionDefinition* parse_function_type(AST& ast, Lexer& lexer, Logger& logger);
 
-int parse_type(AST& ast, Lexer& lexer, Logger& logger) {
+TypeExpression parse_type(AST& ast, Lexer& lexer, Logger& logger) {
   if (lexer.matches(TokenType::Name)) {
-    return parse_type_alias(ast, lexer, logger);
+    return TypeExpression{.alias_or_primitive  = parse_type_alias(ast, lexer, logger)};
   } else if (lexer.matches(TokenType::Struct)) {
-    return parse_struct_type(ast, lexer, logger);
+    return TypeExpression{.struct_definition   = parse_struct_type(ast, lexer, logger)};
   } else if (lexer.matches(TokenType::Enum)) {
-    return parse_enum_type(ast, lexer, logger);
+    return TypeExpression{.enum_definition     = parse_enum_type(ast, lexer, logger)};
   } else if (lexer.matches(TokenType::Union)) {
-    return parse_union_type(ast, lexer, logger);
+    return TypeExpression{.union_definition    = parse_union_type(ast, lexer, logger)};
   } else if (lexer.matches(TokenType::LeftParenthesis)) {
-    return parse_function_type(ast, lexer, logger);
+    return TypeExpression{.function_definition = parse_function_type(ast, lexer, logger)};
   } else {
-    return make_node(ast, ASTNodeType::Unknown, lexer);
+    return TypeExpression{.any                 = ast.create_node<ASTNode>(lexer.peek_span())};
   }
 }
 
-static int parse_type_alias(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::TypeAlias, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTTypeAliasData>();
+static GenericOrBuiltinType* parse_type_alias(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<GenericOrBuiltinType>(lexer.peek_span());
 
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger))
-    return nodei;
+  node->reference = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger))
+    return node;
 
-  data->has_arguments = match_generic_parameter_list(lexer);
-  if (!data->has_arguments) {
-    return nodei;
-  }
+  if (match_generic_parameter_list(lexer))
+    add_generic_parameter_list(node->first_parameter, node->num_parameters, node, ast, lexer, logger);
 
-  add_child(ast, nodei, parse_generic_parameter_list(ast, lexer, logger));
-  return nodei;
+  return node;
 }
 
-int parse_generic_parameter_list(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::GenericParameterList, lexer);
+bool add_generic_parameter_list(TypeOrValueExpression& first, size_t& num, ASTNode* node, AST& ast, Lexer& lexer, Logger& logger) {
+  if (!expect_token(node, TokenType::LeftSquare, lexer, logger))
+    return false;
 
-  if (!expect_token(ast.nodes[nodei], TokenType::LeftSquare, lexer, logger))
-    return nodei;
+  num = 0;
+  while (not_matching(TokenType::RightSquare, lexer, logger, node)) {  
+    TypeOrValueExpression parameter;
 
-  while (not_matching(TokenType::RightSquare, lexer, logger, ast, nodei, "generic parameter list")) {  
     if (match_compile_time_directive(lexer)) {
-      static_assert((int)GenericParameterListChildren::Expression == -1);
-      absorb_and_consume(ast, nodei, lexer);
-      parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{.in_comma_list=true,.in_square=true});
+      absorb_and_consume(node, lexer);
+      parameter.value = parse_expression(ast, lexer, logger, ExpressionParsingContext{.in_comma_list=true,.in_square=true});
     } else {
-      static_assert((int)GenericParameterListChildren::Type == -1);
-      add_child(ast, nodei, parse_type(ast, lexer, logger));
+      parameter.type = parse_type(ast, lexer, logger);
     }
+
+    if (num == 0)
+      first = parameter;
+    num++;
 
     if (!lexer.matches(TokenType::RightSquare)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        return nodei;
+      if (!expect_token(node, TokenType::Comma, lexer, logger))
+        return false;
     }
   }
 
-  return nodei;
+  return false;
 }
 
 bool match_generic_parameter_list(const Lexer& lexer) {
   return lexer.matches(TokenType::LeftSquare);
 }
 
-static int parse_struct_entry(AST& ast, Lexer& lexer, Logger& logger);
+static StructEntry* parse_struct_entry(AST& ast, Lexer& lexer, Logger& logger);
 
-static int parse_struct_type(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::StructDefinition, lexer);
+static StructDefinition* parse_struct_type(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<StructDefinition>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Struct, lexer, logger))
-    return nodei;
+  if (!expect_token(node, TokenType::Struct, lexer, logger))
+    return node;
 
   // empty struct definition
   if (!lexer.matches(TokenType::LeftBrace)) {
-    return nodei;
+    return node;
   } else {
-    absorb_and_consume(ast, nodei, lexer);
+    absorb_and_consume(node, lexer);
   }
 
-  while (not_matching(TokenType::RightBrace, lexer, logger, ast, nodei, "struct definition list")) {
-    static_assert((int)StructDefinitionChildren::StructEntry == -1);
-    add_child(ast, nodei, parse_struct_entry(ast, lexer, logger));
+  while (not_matching(TokenType::RightBrace, lexer, logger, node)) {
+    auto entry = parse_struct_entry(ast, lexer, logger);
+    if (node->first_entry == nullptr)
+      node->first_entry = entry;
+
+    add_child(node, entry);
+    node->num_entries++;
 
     if (!lexer.matches(TokenType::RightBrace)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        return nodei;
+      if (!expect_token(node, TokenType::Comma, lexer, logger))
+        return node;
     }
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_struct_entry(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::StructEntry, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTStructEntryData>();
+static StructEntry* parse_struct_entry(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<StructEntry>(lexer.peek_span());
 
   // spread operator
-  data->is_spread = lexer.matches(TokenType::Ellipsis);
-  if (data->is_spread) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Ellipsis, lexer, logger))
-      return nodei;
+  node->is_spread = lexer.matches(TokenType::Ellipsis);
+  if (node->is_spread) {
+    if (!expect_token(node, TokenType::Ellipsis, lexer, logger))
+      return node;
 
-    data->is_spread = true;
-    data->has_type = true;
-    data->has_default_value = false;
-
-    static_assert((int)StructEntryChildren::Type == 1);
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
-    return nodei;
+    node->entry_type = parse_type(ast, lexer, logger);
+    add_child(node, node->entry_type.any);
+    return node;
   }
 
   // or member
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger, 
+  node->member_name = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger, 
     "Expected member name or spread operator in struct type definition."))
-    return nodei;
-  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer, logger))
-    return nodei;
+    return node;
+  if (!expect_token(node, TokenType::Colon, lexer, logger))
+    return node;
 
-  data->has_type = !lexer.matches(TokenType::Equals);
-  if (data->has_type) {
-    static_assert((int)StructEntryChildren::Type == 1);
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
+  if (!lexer.matches(TokenType::Equals)) {
+    node->entry_type = parse_type(ast, lexer, logger);
+    add_child(node, node->entry_type.any);
   }
 
-  data->has_default_value = lexer.matches(TokenType::Equals);
-  if (data->has_default_value) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Equals, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::Equals)) {
+    absorb_and_consume(node, lexer);
 
-    static_assert((int)StructEntryChildren::Expression == 2);
-    parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{.in_comma_list=true});
+    node->default_value = parse_expression(ast, lexer, logger, ExpressionParsingContext{.in_comma_list=true});
+    add_child(node, node->default_value.any);
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_enum_entry(AST& ast, Lexer& lexer, Logger& logger);
+static EnumEntry* parse_enum_entry(AST& ast, Lexer& lexer, Logger& logger);
 
-static int parse_enum_type(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::EnumDefinition, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTEnumDefinitionData>();
+static EnumDefinition* parse_enum_type(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<EnumDefinition>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Enum, lexer, logger))
-    return nodei;
+  if (!expect_token(node, TokenType::Enum, lexer, logger))
+    return node;
 
-  data->has_type = lexer.matches(TokenType::LeftSquare);
-  if (data->has_type) {
-    if (!expect_token(ast.nodes[nodei], TokenType::LeftSquare, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::LeftSquare)) {
+    if (!expect_token(node, TokenType::LeftSquare, lexer, logger))
+      return node;
 
-    static_assert((int)EnumDefinitionChildren::Type == 1);
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
+    node->underlying_type = parse_type(ast, lexer, logger);
+    add_child(node, node->underlying_type.any);
     
-    if (!expect_token(ast.nodes[nodei], TokenType::RightSquare, lexer, logger))
-      return nodei;
+    if (!expect_token(node, TokenType::RightSquare, lexer, logger))
+      return node;
   }
 
   // empty enum definition
   if (!lexer.matches(TokenType::LeftBrace)) {
-    return nodei;
+    return node;
   } else {
-    absorb_and_consume(ast, nodei, lexer);
+    absorb_and_consume(node, lexer);
   }
 
-  while (not_matching(TokenType::RightBrace, lexer, logger, ast, nodei, "enum definition list")) {
-    static_assert((int)EnumDefinitionChildren::EnumEntry == -1);
-    add_child(ast, nodei, parse_enum_entry(ast, lexer, logger));
+  while (not_matching(TokenType::RightBrace, lexer, logger, node)) {
+    auto entry = parse_enum_entry(ast, lexer, logger);
+    if (node->first_entry == nullptr)
+      node->first_entry = entry;
+    add_child(node, entry);
+    node->num_entries++;
 
     if (!lexer.matches(TokenType::RightBrace)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        return nodei;
+      if (!expect_token(node, TokenType::Comma, lexer, logger))
+        return node;
     }
   }
 
-  return nodei; 
+  return node; 
 }
 
-static int parse_enum_entry(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::EnumEntry, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTEnumEntryData>();
+static EnumEntry* parse_enum_entry(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<EnumEntry>(lexer.peek_span());
 
   // spread operator
-  data->is_spread = lexer.matches(TokenType::Ellipsis);
-  if (data->is_spread) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Ellipsis, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::Ellipsis)) {
+    if (!expect_token(node, TokenType::Ellipsis, lexer, logger))
+      return node;
 
-    data->is_spread = true;
-    data->has_value = false;
+    node->spread_type = parse_type(ast, lexer, logger);
+    add_child(node, node->spread_type.any);
 
-    static_assert((int)EnumEntryChildren::Type == 1);
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
-    return nodei;
+    return node;
   }
 
   // or member
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger, 
+  node->constant_name = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger, 
     "Expected member name or spread operator in enum type definition."))
-    return nodei;
+    return node;
 
-  data->has_value = lexer.matches(TokenType::Equals);
-  if (data->has_value) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Equals, lexer, logger))
-      return nodei;
-
-    static_assert((int)EnumEntryChildren::Expression == 1);
-    parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{.in_comma_list=true});
+  if (lexer.matches(TokenType::Equals)) {
+    absorb_and_consume(node, lexer);
+    
+    node->value = parse_expression(ast, lexer, logger, ExpressionParsingContext{.in_comma_list=true});
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_union_entry(AST& ast, Lexer& lexer, Logger& logger);
+static UnionEntry* parse_union_entry(AST& ast, Lexer& lexer, Logger& logger);
 
-static int parse_union_type(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::UnionDefinition, lexer);
+static UnionDefinition* parse_union_type(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<UnionDefinition>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Union, lexer, logger))
-    return nodei;
+  if (!expect_token(node, TokenType::Union, lexer, logger))
+    return node;
 
   // empty union definition
   if (!lexer.matches(TokenType::LeftBrace)) {
-    return nodei;
+    return node;
   } else {
-    absorb_and_consume(ast, nodei, lexer);
+    absorb_and_consume(node, lexer);
   }
 
-  while (not_matching(TokenType::RightBrace, lexer, logger, ast, nodei, "union definition list")) {
-    static_assert((int)UnionDefinitionChildren::UnionEntry == -1);
-    add_child(ast, nodei, parse_union_entry(ast, lexer, logger));
+  while (not_matching(TokenType::RightBrace, lexer, logger, node)) {
+    auto entry = parse_union_entry(ast, lexer, logger);
+    if (node->first_entry == nullptr)
+      node->first_entry = entry;
+    add_child(node, entry);
+    node->num_entries++;
 
     if (!lexer.matches(TokenType::RightBrace)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        return nodei;
+      if (!expect_token(node, TokenType::Comma, lexer, logger))
+        return node;
     }
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_union_entry(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::UnionEntry, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTUnionEntryData>();
+static UnionEntry* parse_union_entry(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<UnionEntry>(lexer.peek_span());
 
-  // @todo not sure if spread is a good idea for unions
-  data->is_spread = false;
-
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger, 
+  node->participant_name = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger, 
     "Expected member name or spread operator in union type definition."))
-    return nodei;
-  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer, logger))
-    return nodei;
+    return node;
+  if (!expect_token(node, TokenType::Colon, lexer, logger))
+    return node;
 
-  static_assert((int)UnionEntryChildren::Type == 1);
-  add_child(ast, nodei, parse_type(ast, lexer, logger));
+  node->entry_type = parse_type(ast, lexer, logger);
+  add_child(node, node->entry_type.any);
   
-  return nodei;
+  return node;
 }
 
-static int parse_parameter_definition_list(AST& ast, Lexer& lexer, Logger& logger);
+static bool add_parameter_definitions(FunctionParameterDefinition*& first, size_t& num, ASTNode* node, AST& ast, Lexer& lexer, Logger& logger);
 
-static int parse_function_type(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::FunctionDefinition, lexer);
-  auto* data = ast.nodes[nodei].cast_data<ASTFunctionDefinitionData>();
+static FunctionDefinition* parse_function_type(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<FunctionDefinition>(lexer.peek_span());
 
-  static_assert((int)FunctionDefinitionChildren::ParameterDefinitionList == 1);
-  add_child(ast, nodei, parse_parameter_definition_list(ast, lexer, logger));
+  add_parameter_definitions(node->first_parameter, node->num_parameters, node, ast, lexer, logger);
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Arrow, lexer, logger,
+  if (!expect_token(node, TokenType::Arrow, lexer, logger,
       "Expected '->' followed by the function's return type."))
-    return nodei;
+    return node;
 
   if (lexer.matches(TokenType::Void)) {
-    absorb_and_consume(ast, nodei, lexer);
-    data->is_void = true;
-    return nodei;
+    absorb_and_consume(node, lexer);
+    return node;
   }
 
-  static_assert((int)FunctionDefinitionChildren::Type == 2);
-  add_child(ast, nodei, parse_type(ast, lexer, logger));
-  return nodei;
+  node->return_type = parse_type(ast, lexer, logger);
+  add_child(node, node->return_type.any);
+  return node;
 }
 
-static int parse_parameter_definition(AST& ast, Lexer& lexer, Logger& logger);
+static FunctionParameterDefinition* parse_parameter_definition(AST& ast, Lexer& lexer, Logger& logger);
 
-static int parse_parameter_definition_list(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::ParameterDefinitionList, lexer);
-
-  if (!expect_token(ast.nodes[nodei], TokenType::LeftParenthesis, lexer, logger))
-    return nodei;
+static bool add_parameter_definitions(FunctionParameterDefinition*& first, size_t& num, ASTNode* node, AST& ast, Lexer& lexer, Logger& logger) {
+  if (!expect_token(node, TokenType::LeftParenthesis, lexer, logger))
+    return node;
   
-  while (not_matching(TokenType::RightParenthesis, lexer, logger, ast, nodei, "function parameter definition list")) {
-    static_assert((int)UnionDefinitionChildren::UnionEntry == -1);
-    add_child(ast, nodei, parse_parameter_definition(ast, lexer, logger));
+  while (not_matching(TokenType::RightParenthesis, lexer, logger, node)) {
+    auto parameter_definition = parse_parameter_definition(ast, lexer, logger);
+    if (first == nullptr)
+      first = parameter_definition;
+    add_child(node, parameter_definition);
+    num++;
 
     if (!lexer.matches(TokenType::RightParenthesis)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        return nodei;
+      if (!expect_token(node, TokenType::Comma, lexer, logger))
+        return node;
     }
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_parameter_definition(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::ParameterDefinition, lexer);
-  auto data = ast.nodes[nodei].cast_data<ASTParameterDefinitionData>();
+static FunctionParameterDefinition* parse_parameter_definition(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<FunctionParameterDefinition>(lexer.peek_span());
 
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger, 
+  node->identifier = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger, 
     "Expected parameter name."))
-    return nodei;
-  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer, logger))
-    return nodei;
+    return node;
+  if (!expect_token(node, TokenType::Colon, lexer, logger))
+    return node;
 
   
-  static_assert((int)StructEntryChildren::Type == 1);
-  add_child(ast, nodei, parse_type(ast, lexer, logger));
+  node->parameter_type = parse_type(ast, lexer, logger);
+  add_child(node, node->parameter_type.any);
 
-  data->has_default_value = lexer.matches(TokenType::Equals);
-  if (data->has_default_value) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Equals, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::Equals)) {
+    absorb_and_consume(node, lexer);
 
-    static_assert((int)StructEntryChildren::Expression == 2);
-    parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{.in_parenthesis=true,.in_comma_list=true});
+    auto default_value = parse_expression(ast, lexer, logger, ExpressionParsingContext{.in_parenthesis=true,.in_comma_list=true});
+    node->default_value = default_value;
+    add_child(node, default_value.any);
   }
 
-  return nodei;
+  return node;
 }

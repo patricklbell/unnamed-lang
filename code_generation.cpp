@@ -47,7 +47,7 @@ struct CGContext {
   llvm::Module* llvm_module;
   llvm::Function* llvm_function;
 
-  std::unordered_map<std::string, ASTFunctionDeclarationData*> function_protos;
+  std::unordered_map<std::string, FunctionDeclaration*> function_protos;
   std::unordered_map<std::string, NamedValue> named_values;
 
   TypeInfo* types;

@@ -2,7 +2,7 @@
 
 #include "ast.hpp"
 
-int parse_type(AST& ast, Lexer& lexer, Logger& logger);
+TypeExpression parse_type(AST& ast, Lexer& lexer, Logger& logger);
 
-int parse_generic_parameter_list(AST& ast, Lexer& lexer, Logger& logger);
+bool add_generic_parameter_list(TypeOrValueExpression& first, size_t& num, ASTNode* node, AST& ast, Lexer& lexer, Logger& logger);
 bool match_generic_parameter_list(const Lexer& lexer);

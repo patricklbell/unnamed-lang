@@ -4,57 +4,58 @@
 #include "parse_type.hpp"
 
 static bool match_block(const Lexer& lexer);
-static int parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block = false);
+static Block* parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block = false);
 static bool match_var_func_or_type(const Lexer& lexer);
-static int parse_var_func_or_type(AST& ast, Lexer& lexer, Logger& logger);
+static ASTNode* parse_var_func_or_type(AST& ast, Lexer& lexer, Logger& logger);
 
 static bool match_return_statement(const Lexer& lexer) {
   return lexer.matches(TokenType::Return);
 }
 
-static int parse_return_statement(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::Return, lexer);
+static ReturnStatement* parse_return_statement(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<ReturnStatement>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Return, lexer)) {
+  if (!expect_token(node, TokenType::Return, lexer)) {
     logger.log(Errors::Syntax, "Return expected.", lexer.peek_span());
-    return nodei;
+    return node;
   }
 
-  parse_expression_add_child(ast, lexer, logger, nodei);
+  node->expression = parse_expression(ast, lexer, logger);
+  add_child(node, node->expression.any);
 
-  expect_token(ast.nodes[nodei], TokenType::Semicolon, lexer, logger);
-  return nodei;
+  expect_token(node, TokenType::Semicolon, lexer, logger);
+  return node;
 }
 
 static bool match_if(const Lexer& lexer) {
   return lexer.matches(TokenType::If);
 }
 
-static int parse_if(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::If, lexer);
-  ASTIfData* data = ast.nodes[nodei].cast_data<ASTIfData>();
+static IfElseStatement* parse_if(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<IfElseStatement>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::If, lexer)) {
+  if (!expect_token(node, TokenType::If, lexer)) {
     logger.log(Errors::Syntax, "If expected.", lexer.peek_span());
-    return nodei;
+    return node;
   }
 
-  parse_expression_add_child(ast, lexer, logger, nodei);
+  node->first_condition = parse_expression(ast, lexer, logger);
+  add_child(node, node->first_condition.any);
 
-  int if_blocki = parse_block(ast, lexer, logger);
-  ast.nodes[if_blocki].cast_data<ASTBlockData>()->llvm_bb_name = "if";
-  add_child(ast, nodei, if_blocki);
+  auto if_block = parse_block(ast, lexer, logger);
+  if_block->llvm_bb_name = "if";
+  add_child(node, if_block);
 
-  while (not_end(lexer, logger, ast, nodei, "if")) {
+  while (not_end(lexer, logger, node)) {
     if (lexer.matches(TokenType::Else, 0) && lexer.matches(TokenType::If, 1)) {
-      absorb_and_consume(ast, nodei, lexer);
-      absorb_and_consume(ast, nodei, lexer);
+      absorb_and_consume(node, lexer);
+      absorb_and_consume(node, lexer);
 
-      parse_expression_add_child(ast, lexer, logger, nodei);
+      add_child(node, parse_expression(ast, lexer, logger).any);
 
-      int blocki = parse_block(ast, lexer, logger);
-      ast.nodes[blocki].cast_data<ASTBlockData>()->llvm_bb_name = "elseif";
-      add_child(ast, nodei, blocki);
+      auto block = parse_block(ast, lexer, logger);
+      block->llvm_bb_name = "elseif";
+      add_child(node, block);
 
       continue;
     }
@@ -62,149 +63,129 @@ static int parse_if(AST& ast, Lexer& lexer, Logger& logger) {
     break;
   }
 
-  data->has_else = lexer.matches(TokenType::Else);
-  if (data->has_else) {
+  if (lexer.matches(TokenType::Else)) {
     lexer.consume_token();
 
-    int blocki = parse_block(ast, lexer, logger);
-    ast.nodes[blocki].cast_data<ASTBlockData>()->llvm_bb_name = "else";
-    add_child(ast, nodei, blocki);
+    node->else_block = parse_block(ast, lexer, logger);
+    node->else_block->llvm_bb_name = "else";
+    add_child(node, node->else_block);
   }
 
-  return nodei;
+  return node;
 }
 
 static bool match_while(const Lexer& lexer) {
   return lexer.matches(TokenType::While);
 }
 
-static int parse_while(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::While, lexer);
+static WhileStatement* parse_while(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<WhileStatement>(lexer.peek_span());
 
-  if (!expect_token(ast.nodes[nodei], TokenType::While, lexer)) {
+  if (!expect_token(node, TokenType::While, lexer)) {
     logger.log(Errors::Syntax, "While expected.", lexer.peek_span());
-    return nodei;
+    return node;
   }
 
-  parse_expression_add_child(ast, lexer, logger, nodei);
+  node->condition = parse_expression(ast, lexer, logger);
+  add_child(node, node->condition.any);
 
-  add_child(ast, nodei, parse_block(ast, lexer, logger));
+  node->body = parse_block(ast, lexer, logger);
+  add_child(node, node->body);
 
-  return nodei;
+  return node;
 }
 
-static int parse_expression_statement(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::ExpressionStatement, lexer);
+static ExpressionStatement* parse_expression_statement(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<ExpressionStatement>(lexer.peek_span());
 
   // make sure expression consumes some tokens so that parse doesn't get stuck on blocks
   int pos_before = lexer.peek_span().start.pos;
 
-  parse_expression_add_child(ast, lexer, logger, nodei);
+  node->expression = parse_expression(ast, lexer, logger);
+  add_child(node, node->expression.any);
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Semicolon, lexer, logger)) {
+  if (!expect_token(node, TokenType::Semicolon, lexer, logger)) {
     if (pos_before == lexer.peek_span().start.pos)
       lexer.consume_token();
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_statement(AST& ast, Lexer& lexer, Logger& logger) {
+static ASTNode* parse_statement(AST& ast, Lexer& lexer, Logger& logger) {
   if (match_if(lexer)) {
     return parse_if(ast, lexer, logger);
   } else if (match_while(lexer)) {
     return parse_while(ast, lexer, logger);
   } else if (match_block(lexer)) {
     return parse_block(ast, lexer, logger, true);
-  }
-
-  int nodei;
-  if (match_return_statement(lexer)) {
-    nodei = parse_return_statement(ast, lexer, logger);
+  } else if (match_return_statement(lexer)) {
+    return parse_return_statement(ast, lexer, logger);
   } else if (match_var_func_or_type(lexer)) {
-    nodei = parse_var_func_or_type(ast, lexer, logger);
-  } else {
-    nodei = parse_expression_statement(ast, lexer, logger);
+    return parse_var_func_or_type(ast, lexer, logger);
   }
 
-  return nodei;
+  return parse_expression_statement(ast, lexer, logger);
 }
 
 static bool match_block(const Lexer& lexer) {
   return lexer.matches(TokenType::LeftBrace);
 }
 
-static int parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block) {
-  int nodei = make_node(ast, ASTNodeType::Block, lexer);
+static Block* parse_block(AST& ast, Lexer& lexer, Logger& logger, bool dont_create_basic_block) {
+  auto node = ast.create_node<Block>(lexer.peek_span());
 
-  ASTBlockData* data = ast.nodes[nodei].cast_data<ASTBlockData>();
-  data->dont_create_basic_block = dont_create_basic_block;
+  node->dont_create_basic_block = dont_create_basic_block;
 
-  if (!expect_token(ast.nodes[nodei], TokenType::LeftBrace, lexer))
+  if (!expect_token(node, TokenType::LeftBrace, lexer))
     logger.log(Errors::Syntax, "Expected '{' to start code block.", lexer.peek_span());
 
   // @todo better understand unmatched braces
-  while (not_matching(TokenType::RightBrace, lexer, logger, ast, nodei, "code block")) {
-    add_child(ast, nodei, parse_statement(ast, lexer, logger));
+  while (not_matching(TokenType::RightBrace, lexer, logger, node)) {
+    auto statement = parse_statement(ast, lexer, logger);
+    if (node->first_statement_or_scope == nullptr)
+      node->first_statement_or_scope = statement;
+
+    add_child(node, statement);
+    node->num_statements_or_scopes++;
   }
 
-  return nodei;
+  return node;
 }
 
-static int parse_generic_parameter_definition(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::GenericParameterDefinition, lexer);
+static GenericParameterDefinition* parse_generic_parameter_definition(AST& ast, Lexer& lexer, Logger& logger) {
+  auto node = ast.create_node<GenericParameterDefinition>(lexer.peek_span());
 
-  auto* data = ast.nodes[nodei].cast_data<ASTGenericParameterDefinitionData>();
-
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger, "Expected generic parameter name."))
-    return nodei;
+  node->parameter_identifier = get_next_name(ast, lexer);
+  if (!expect_token(node, TokenType::Name, lexer, logger, "Expected generic parameter name."))
+    return node;
   
-  static_assert((int)GenericParameterDefinitionChildren::Type == 1);
-  data->has_type = lexer.matches(TokenType::Colon);
-  if (data->has_type) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::Colon)) {
+    if (!expect_token(node, TokenType::Colon, lexer, logger))
+      return node;
       
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
+    node->parameter_type = parse_type(ast, lexer, logger);
+    add_child(node, node->parameter_type.any);
   }
 
-  data->has_default_value = lexer.matches(TokenType::Equals);
-  if (data->has_default_value) {
-    if (!expect_token(ast.nodes[nodei], TokenType::Equals, lexer, logger))
-      return nodei;
+  if (lexer.matches(TokenType::Equals)) {
+    absorb_and_consume(node, lexer);
 
     // the default value can either be a type or an expression,
     // to determine the difference we look for compile-time
     // directive. @note compile-time
-    static_assert((int)GenericParameterDefinitionChildren::ExpressionOrType == 2);
+    TypeOrValueExpression default_value;
     if (match_compile_time_directive(lexer)) {
-      absorb_and_consume(ast, nodei, lexer);
-      parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{.in_comma_list=true,.in_square=true});
+      absorb_and_consume(node, lexer); // @todo assumes compile time directive is one token
+      default_value.value = parse_expression(ast, lexer, logger, ExpressionParsingContext{.in_comma_list=true,.in_square=true});
     } else {
-      add_child(ast, nodei, parse_type(ast, lexer, logger));
+      default_value.type = parse_type(ast, lexer, logger);
     }
+    add_child(node, default_value.any);
+    node->default_value = default_value;
   }
 
-  return nodei;
-}
-
-static int parse_generic_parameter_definition_list(AST& ast, Lexer& lexer, Logger& logger) {
-  int nodei = make_node(ast, ASTNodeType::GenericParameterDefinitionList, lexer);
-
-  if (!expect_token(ast.nodes[nodei], TokenType::LeftSquare, lexer, logger))
-    return nodei;
-
-  while (not_matching(TokenType::RightSquare, lexer, logger, ast, nodei, "generic parameter definition list")) {
-    add_child(ast, nodei, parse_generic_parameter_definition(ast, lexer, logger));
-
-    if (!lexer.matches(TokenType::RightSquare)) {
-      if (!expect_token(ast.nodes[nodei], TokenType::Comma, lexer, logger))
-        break;
-    }
-  }
-
-  return nodei;
+  return node;
 }
 
 static bool match_generic_parameter_definition_list(const Lexer& lexer) {
@@ -217,86 +198,103 @@ static bool match_var_func_or_type(const Lexer& lexer) {
     (lexer.matches(TokenType::Colon, 1) || lexer.matches(TokenType::LeftSquare, 1));
 }
 
-static int parse_var_func_or_type(AST& ast, Lexer& lexer, Logger& logger) {
+// @note can return a null ptr if it fails
+static ASTNode* parse_var_func_or_type(AST& ast, Lexer& lexer, Logger& logger) {
+  TextSpan start_span = lexer.peek_span();
   // we can't know without parsing further whether this is a variable definition
   // or a type definition
-  int nodei = make_node(ast, ASTNodeType::Unknown, lexer);
-  bool is_generic = false;
-  bool has_type = false;
+  name_id identifier = get_next_name(ast, lexer);
+  expect_token(TokenType::Name, lexer, logger);
 
-  add_name(ast, nodei, lexer);
-  if (!expect_token(ast.nodes[nodei], TokenType::Name, lexer, logger))
-    return nodei;
-
+  std::vector<GenericParameterDefinition*> generic_parameters;
   if (match_generic_parameter_definition_list(lexer)) {
-    static_assert((int)FunctionDeclarationChildren::GenericParameterDefinitionList == 1);
-    static_assert((int)TypeDefinitionChildren::GenericParameterDefinitionList == 1);
-    is_generic = true;
+    expect_token(TokenType::LeftSquare, lexer, logger);
 
-    add_child(ast, nodei, parse_generic_parameter_definition_list(ast, lexer, logger));
+    while (not_matching(TokenType::RightSquare, lexer, logger)) {
+      generic_parameters.push_back(parse_generic_parameter_definition(ast, lexer, logger));
+      
+      if (!lexer.matches(TokenType::RightSquare)) {
+        expect_token(TokenType::Comma, lexer, logger);
+      }
+    }
   }
 
-  if (!expect_token(ast.nodes[nodei], TokenType::Colon, lexer, logger))
-    return nodei;
+  expect_token(TokenType::Colon, lexer, logger);
   
+  TypeExpression type = TypeExpression{.any = nullptr};
   if (!lexer.matches(TokenType::Equals)) {
-    has_type = true;
-
-    static_assert((int)VariableDeclarationChildren::Type == 1);
-    static_assert((int)FunctionDeclarationChildren::Type == 2);
-    static_assert((int)TypeDefinitionChildren::Type == 2);
-    add_child(ast, nodei, parse_type(ast, lexer, logger));
+    type = parse_type(ast, lexer, logger);
   }
 
+  ASTNode* node;
   if (lexer.matches(TokenType::Equals)) {
     // this must be a variable or function declaration
-    absorb_and_consume(ast, nodei, lexer);
+    lexer.consume_token();
 
     // @note assumes expression can't start with '{'
     if (lexer.matches(TokenType::LeftBrace)) {
-      ast.nodes[nodei].type = ASTNodeType::FunctionDeclaration;
-      construct_data(ast.nodes[nodei]);
+      auto function_declaration = ast.create_node<FunctionDeclaration>(start_span);
+      node = function_declaration;
       
-      auto data = ast.nodes[nodei].cast_data<ASTFunctionDeclarationData>();
-      data->is_generic = is_generic;
-      data->has_type = has_type;
-      
-      static_assert((int)FunctionDeclarationChildren::Block == 3);
-      add_child(ast, nodei, parse_block(ast, lexer, logger));
+      function_declaration->identifier = identifier;
+      function_declaration->num_generic_parameters = generic_parameters.size();
+      function_declaration->first_generic_parameter = generic_parameters.empty() ? nullptr : generic_parameters[0];
+      for (auto p : generic_parameters) add_child(function_declaration, p);
+      function_declaration->definition = type;
+      if (function_declaration->definition.any != nullptr)
+        add_child(function_declaration, function_declaration->definition.any);
+      function_declaration->body = parse_block(ast, lexer, logger);
+      add_child(function_declaration, function_declaration->body);
     } else {
-      if (is_generic) {
-        logger.log(Errors::Syntax, "A variable delaration cannot be generic.", ast.nodes[nodei].span);
-        ast.nodes[nodei].malformed = true;
-      }
-      ast.nodes[nodei].type = ASTNodeType::VariableDeclaration;
-      construct_data(ast.nodes[nodei]);
-      
-      static_assert((int)VariableDeclarationChildren::Expression == 2);
-      parse_expression_add_child(ast, lexer, logger, nodei, ExpressionParsingContext{});
+      auto variable_declaration = ast.create_node<VariableDeclaration>(start_span);
+      node = variable_declaration;
 
-      expect_token(ast.nodes[nodei], TokenType::Semicolon, lexer, logger);
+      if (!generic_parameters.empty()) {
+        logger.log(Errors::Syntax, "A variable delaration cannot be generic.", node->span);
+        variable_declaration->malformed = true;
+      }
+      
+      variable_declaration->identifier = identifier;
+      variable_declaration->desired_type = type;
+      if (variable_declaration->desired_type.any != nullptr)
+        add_child(variable_declaration, variable_declaration->desired_type.any);
+      variable_declaration->value = parse_expression(ast, lexer, logger);
+      add_child(variable_declaration, variable_declaration->value.any);
+
+      expect_token(variable_declaration, TokenType::Semicolon, lexer, logger);
     }
   } else {
-    // otherwise this is a type definition
-    ast.nodes[nodei].type = ASTNodeType::TypeDefinition;
-    construct_data(ast.nodes[nodei]);
-    
-    auto data = ast.nodes[nodei].cast_data<ASTTypeDefinitionData>();
-    data->is_generic = is_generic;
+    auto type_definition = ast.create_node<TypeDefinition>(start_span);
+    node = type_definition;
 
-    expect_token(ast.nodes[nodei], TokenType::Semicolon, lexer, logger);
+    type_definition->identifier = identifier;
+    type_definition->num_generic_parameters = generic_parameters.size();
+    type_definition->first_generic_parameter = generic_parameters.empty() ? nullptr : generic_parameters[0];
+    for (auto p : generic_parameters) add_child(type_definition, p); 
+    type_definition->type_expression = type;
+    if (type_definition->type_expression.any != nullptr)
+      add_child(type_definition, type_definition->type_expression.any);
+
+    expect_token(node, TokenType::Semicolon, lexer, logger);
   }
+  node->span.absorb(start_span);
 
-  return nodei;
+  return node;
 }
 
 void parse_module_ast(AST& ast, std::string name, Lexer& lexer, Logger& logger) {
-  int modulei = make_node(ast, ASTNodeType::Module, lexer);
+  auto module = ast.create_node<Module>(lexer.peek_span());
+  module->module_name = ast.get_name_id(name);
+  add_child_from_different_source(&ast.root, module);
 
   // parse top level statements
   while (true) {
     if (match_var_func_or_type(lexer)) {
-      add_child(ast, modulei, parse_var_func_or_type(ast, lexer, logger));
+      auto node = parse_var_func_or_type(ast, lexer, logger);
+      if (module->first_top_level_declaration == nullptr)
+        module->first_top_level_declaration = node;
+      module->num_top_level_declaration++;
+      add_child(module, node);
     } else if (lexer.matches(TokenType::Semicolon)) {
       lexer.consume_token();
       continue;

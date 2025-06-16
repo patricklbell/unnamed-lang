@@ -4,70 +4,174 @@
 #include "files.hpp"
 #include "logging.hpp"
 #include "helpers.hpp"
+#include "arena.hpp"
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
-// ast nodes
-enum class ASTNodeType : char {
+#define NODE_TYPE_LIST(E) \
+  E(RootNode) E(Module) E(TypeDefinition) E(GenericParameterDefinition) E(GenericOrBuiltinType) E(FunctionDefinition) E(FunctionParameterDefinition) E(StructDefinition) E(StructEntry) E(EnumDefinition) E(EnumEntry) E(UnionDefinition) E(UnionEntry) E(IntLiteral) E(FloatLiteral) E(StringLiteral) E(UndefinedLiteral) E(StructLiteral) E(Variable) E(BinaryOperation) E(UnaryOperation) E(MemberOperation) E(PointerMemberOperation) E(CastOperation) E(Call) E(FunctionDeclaration) E(VariableDeclaration) E(IfElseStatement) E(WhileStatement) E(ExpressionStatement) E(ReturnStatement) E(Block)
+enum class NodeType {
   Unknown = 0,
-
-  Module,
-
-  TypeDefinition,
-  GenericParameterDefinitionList,
-  GenericParameterDefinition,
-  TypeAlias,
-  GenericParameterList,
-  FunctionDefinition,
-  ParameterDefinitionList,
-  ParameterDefinition,
-  StructDefinition,
-  StructEntry,
-  EnumDefinition,
-  EnumEntry,
-  UnionDefinition,
-  UnionEntry,
-  
-  IntLiteral,
-  FloatLiteral,
-  StringLiteral,
-  UndefinedLiteral,
-  StructLiteral,
-  StructLiteralEntryList,
-  StructLiteralEntry,
-  Variable,
-  BinaryOperator,
-  UnaryOperator,
-  CastOperator,
-  Call,
-
-  FunctionDeclaration,
-  VariableDeclaration,
-  Return,
-  ExpressionStatement,
-  If,
-  While,
-  Block,
+  #define NODE_TYPE_ENUM_DEF(name) name,
+  NODE_TYPE_LIST(NODE_TYPE_ENUM_DEF)
 };
 
-std::string to_string(const ASTNodeType& type);
+struct AST;
+struct ASTNode {
+  TextSpan span;
+  bool malformed        = false;
+  NodeType type         = NodeType::Unknown;
+
+  ASTNode* parent       = nullptr;
+  ASTNode* next_sibling = nullptr;
+  ASTNode* first_child  = nullptr;
+  ASTNode* last_child   = nullptr;
+
+#ifdef LANG_DEBUG
+  virtual std::string debug(const AST& ast) const;
+#endif
+};
+
+template<typename NodeType>
+class ASTChildrenIterator {
+  static_assert(std::is_base_of<ASTNode, NodeType>::value);
+
+private:
+  struct ASTChildIter {
+    ASTChildIter(NodeType* node, size_t count) : cur(node), count(count) { };
+    ASTChildIter operator++() {
+      cur = cur->next_sibling;
+      count++;
+      return *this;
+    }
+    NodeType& operator*() {
+      return *cur;
+    }
+    bool operator!=(ASTChildIter &cmp_childiter) {
+      return count != cmp_childiter.count && cur != cmp_childiter.cur;
+    }
+    NodeType* cur;
+    size_t count;
+  };
+
+public:
+  ASTChildrenIterator(ASTNode* parent, size_t count) : parent(parent), count(count) {}
+
+  ASTChildIter begin() { return ASTChildIter(parent->first_child); }
+
+  ASTChildIter end() { return ASTChildIter(nullptr, count); }
+
+private:
+  ASTNode* parent;
+  size_t count;
+};
+
+// adds a default constructor so we can add in the node type automatically,
+// and the debug function.
+#ifdef LANG_DEBUG
+#define AST_NODE_STRUCT_DEF(name) \
+struct name : ASTNode {                                                   \
+  name();                                                                 \
+  virtual std::string debug(const AST& ast) const;
+#else
+#define AST_NODE_STRUCT_DEF(name)  \
+struct name : ASTNode {                                                   \
+  name();
+#endif
+
+#define NODE_TYPE_EARLY_DECLARE(name) struct name;
+NODE_TYPE_LIST(NODE_TYPE_EARLY_DECLARE)
+
+AST_NODE_STRUCT_DEF(RootNode)  ASTNode* first_module;
+  size_t num_modules;
+  ASTChildrenIterator<Module> modules();
+};
+
+void add_child(ASTNode* parent, ASTNode* child);
+void add_parent(ASTNode* child, ASTNode* parent);
+
+void add_child_from_different_source(ASTNode* parent, ASTNode* child);
+
+struct AST {
+  RootNode root;
+
+  std::string get_name(name_id id) const;
+  name_id get_name_id(std::string name);
+
+  template<typename T>
+  T* create_node(TextSpan span) {
+    static_assert(std::is_base_of<ASTNode, T>::value);
+    T* node = this->arena.allocate<T>();
+    ((ASTNode*)node)->span = span;
+    return node;
+  }
+
+private:
+  Arena arena;
+
+  std::unordered_multimap<name_id, std::string> name_id_to_name = {
+    { name_id_int, "int" },
+    { name_id_float, "float" },
+    { name_id_ptr, "ptr" },
+    { name_id_buffer, "buffer" },
+  };
+  name_id id_counter = name_id_num_builtins;
+};
+
+void print_ast(const AST& ast);
+std::string to_string(const AST& ast, const ASTNode* node);
 
 // a module is the top-level node and contains
 // a list of type definition, variable declarations
 // and function declarations.
-enum class ModuleChildren {
-  TypeDefinitions = -1,
-  VariableDeclaration = -1,
-  FunctionDeclaration = -1,
+AST_NODE_STRUCT_DEF(Module)
+  name_id module_name = -1;
+  
+  ASTNode* first_top_level_declaration = nullptr;
+  size_t num_top_level_declaration;
+  ASTChildrenIterator<ASTNode> top_level_declarations();
 };
 
-//
-// types
-//
-// defines a new type with a certain name.
+// type expressions. there are two forms:
+//  - alias, meaning this is a realisation of 
+//    generic type or an alias.
+//  - primitive, this defines a new type.
+// @todo meta types
+union TypeExpression {
+  ASTNode*              any;
+  GenericOrBuiltinType* alias_or_primitive;
+  FunctionDefinition*   function_definition;
+  StructDefinition*     struct_definition;
+  EnumDefinition*       enum_definition;
+  UnionDefinition*      union_definition;
+};
+
+union ValueExpression {
+  ASTNode*                any;
+  IntLiteral*             int_;
+  FloatLiteral*           float_;
+  StringLiteral*          string;
+  StructLiteral*          struct_;
+  UndefinedLiteral*       undefined;
+  Variable*               variable;
+  UnaryOperation*         unary;
+  BinaryOperation*        binary;
+  MemberOperation*        member;
+  PointerMemberOperation* pointer_member;
+  CastOperation*          cast;
+  Call*                   call;
+};
+
+union TypeOrValueExpression {
+  ASTNode*        any;
+  TypeExpression  type;
+  ValueExpression value;
+};
+
+// defines a new type with a certain name which should be unique.
 // types can be generic, meaning they accept a
 // a list of parameters. their parameters can 
 // be meta-types (set of types) or types (eg. int).
@@ -76,17 +180,14 @@ enum class ModuleChildren {
 // all parameters must be resolved at compile time.
 // @note the list of generic parameters may be
 // missing.
-struct ASTTypeDefinitionData {
-  bool is_generic;
-};
+AST_NODE_STRUCT_DEF(TypeDefinition)
+  name_id identifier = -1;
+  
+  TypeExpression type_expression;
 
-enum class TypeDefinitionChildren {
-  GenericParameterDefinitionList  = 1,
-  Type                            = 2,
-};
-
-enum class GenericParameterDefinitionListChildren {
-  GenericParameterDefinition = -1,
+  GenericParameterDefinition* first_generic_parameter = nullptr;
+  size_t num_generic_parameters;
+  ASTChildrenIterator<GenericParameterDefinition> generic_parameter_definitions();
 };
 
 // defines a parameterisation of a generic type,
@@ -94,380 +195,297 @@ enum class GenericParameterDefinitionListChildren {
 // any type (eg. meta-type "Any"). unlike function
 // parameters since a parameter can be a meta-type the
 // default value can be a type.
-struct ASTGenericParameterDefinitionData {
-  bool has_type;
-  bool has_default_value;
+AST_NODE_STRUCT_DEF(GenericParameterDefinition)
+  name_id parameter_identifier = -1;
+
+  TypeExpression parameter_type;
+  TypeOrValueExpression default_value;
 };
 
-// type or expression/type may be missing
-enum class GenericParameterDefinitionChildren {
-  Type              = 1,
-  ExpressionOrType  = 2,
-};
+AST_NODE_STRUCT_DEF(GenericOrBuiltinType)
+  name_id reference = -1;
 
-// @todo meta types
-// a realisation of a type. there are two types:
-//  - derivative, meaning this is a realisation of 
-//    generic type or an alias.
-//  - definition, this defines a new type.
-struct ASTType {
+  TypeOrValueExpression first_parameter;
+  size_t num_parameters;
+  // @todo iterator for union?
+
   Type* resolved_type = nullptr;
-};
-
-struct ASTTypeAliasData : ASTType {
-  bool has_arguments;
-};
-
-// type argument list may be missing
-enum class TypeAliasChildren {
-  GenericParameterList = 1,
-};
-
-// @note child could be either an a type or a compile time expression
-enum class GenericParameterListChildren {
-  Type = -1,
-  Expression = -1,
 };
 
 // defines a function, if the function is missing
 // it's body then the resulting type is a 
 // function type, otherwise the type is the function
 // itself (ie. not the same as a function with the same prototype).
-struct ASTFunctionDefinitionData : ASTType {
-  // void is not a type in itself, but rather part
-  // of the function type
-  bool is_void;
-};
+AST_NODE_STRUCT_DEF(FunctionDefinition)
+  FunctionParameterDefinition* first_parameter = nullptr;
+  size_t num_parameters;
+  ASTChildrenIterator<FunctionParameterDefinition> get_parameters();
 
-// functions
-enum class FunctionDefinitionChildren {
-  ParameterDefinitionList = 1,
-  Type                    = 2,
-};
+  // void is not a type in itself, but rather when return type if missing
+  TypeExpression return_type;
 
-enum class ParameterDefinitionListChildren {
-  ParameterDefinition = -1,
-};
-
-struct ASTParameterDefinitionData {
-  llvm::AllocaInst* llvm_alloca_inst = nullptr;
-  
-  bool has_default_value;
-};
-
-// @note expression may be missing
-enum class ParameterDefinitionChildren {
-  Type = 1,
-  Expression = 2,
-};
-
-// structs
-struct ASTStructDefinitionData : ASTType {
-
-};
-
-// list of struct entries
-enum class StructDefinitionChildren {
-  StructEntry = -1,
-};
-
-struct ASTStructEntryData {
-  bool is_spread;
-  bool has_type;
-  bool has_default_value;
-};
-
-// @note type or expression may be missing
-enum class StructEntryChildren {
-  Type = 1,
-  Expression = 2,
-};
-
-// enums
-struct ASTEnumDefinitionData : ASTType {
-  bool has_type;
-};
-
-enum class EnumDefinitionChildren {
-  Type = 1,
-  EnumEntry = -1,
-};
-
-struct ASTEnumEntryData {
-  bool is_spread;
-  bool has_value;
-};
-
-// @note expression may not be present
-enum class EnumEntryChildren {
-  Type = 1,
-  Expression = 1,
-};
-
-// unions
-struct ASTUnionDefinitionData : ASTType {
-
-};
-
-enum class UnionDefinitionChildren {
-  UnionEntry = -1,
-};
-
-struct ASTUnionEntryData {
-  bool is_spread;
-};
-
-// @note type may be missing
-enum class UnionEntryChildren {
-  Type = 1,
-};
-
-//
-// expressions
-//
-// common expression data which must be realised as
-// an actual node type
-struct ASTExpression {
-  llvm::Value* llvm_value = nullptr;
   Type* resolved_type = nullptr;
 };
 
-struct ASTIntLiteralData : ASTExpression {
+AST_NODE_STRUCT_DEF(FunctionParameterDefinition)
+  TypeExpression parameter_type;
+  ValueExpression default_value;
+  name_id identifier = -1;
+
+  llvm::AllocaInst* llvm_alloca_inst = nullptr;
+};
+
+// structs
+AST_NODE_STRUCT_DEF(StructDefinition)
+  StructEntry* first_entry = nullptr;
+  size_t num_entries;
+  ASTChildrenIterator<StructEntry> get_entries();
+
+  Type* resolved_type = nullptr;
+};
+
+AST_NODE_STRUCT_DEF(StructEntry)
+  name_id member_name = -1;
+  bool is_spread;
+  TypeExpression entry_type;
+  ValueExpression default_value;
+};
+
+// enums
+AST_NODE_STRUCT_DEF(EnumDefinition)
+  TypeExpression underlying_type;
+  EnumEntry* first_entry = nullptr;
+  size_t num_entries;
+  ASTChildrenIterator<EnumEntry> get_entries();
+
+  Type* resolved_type = nullptr;
+};
+
+AST_NODE_STRUCT_DEF(EnumEntry)
+  name_id constant_name = -1;
+  TypeExpression spread_type;
+  ValueExpression value;
+};
+
+// unions
+AST_NODE_STRUCT_DEF(UnionDefinition)
+  UnionEntry* first_entry = nullptr;
+  size_t num_entries;
+  ASTChildrenIterator<UnionEntry> get_entries();
+
+  Type* resolved_type = nullptr;
+};
+
+AST_NODE_STRUCT_DEF(UnionEntry)
+  name_id participant_name = -1;
+  TypeExpression entry_type;
+};
+
+AST_NODE_STRUCT_DEF(IntLiteral)
   int value;
 };
 
-struct ASTFloatLiteralData : ASTExpression {
+AST_NODE_STRUCT_DEF(FloatLiteral) 
   float value;
 };
 
-struct ASTStringLiteralData : ASTExpression {
+AST_NODE_STRUCT_DEF(StringLiteral) 
   std::string value;
 };
 
-struct ASTStructLiteralData : ASTExpression {};
-
-// @note any missing entries should be initialized following
-// the struct's default values.
-enum class StructLiteralChildren {
-  Type = 1,
-  StructLiteralEntryList = 2,
+AST_NODE_STRUCT_DEF(UndefinedLiteral)
 };
 
-enum class StructLiteralEntryListChildren {
-  StructLiteralEntry = -1,
+AST_NODE_STRUCT_DEF(StructLiteral)  
+  // @note any missing entries should be initialized following
+  // this struct's default values.
+  TypeExpression referencing_type;
+
+  // @todo better way of storing member names
+  std::vector<name_id> entry_member_names;
+  ValueExpression first_entry;
+  size_t num_entries;
 };
 
-// this node is needed to store the name 
-// of the struct entry
-enum class StructLiteralEntryChildren {
-  Expression = 1,
+AST_NODE_STRUCT_DEF(Variable)  
+  name_id identifier = -1;
 };
 
+#define UNARY_OPERATOR_LIST(E) \
+  E(PrefixIncrement)\
+  E(PrefixDecrement)\
+  E(Plus)\
+  E(Minus)\
+  E(LogicalNot)\
+  E(Dereference)\
+  E(AddressOf)\
+  E(PostfixIncrement)\
+  E(PostfixDecrement)\
+  E(Member)\
+  E(PointerMember)
 enum class UnaryOperator {
-  // prefix
-  PrefixIncrement,
-  PrefixDecrement,
-  Plus,
-  Minus,
-  LogicalNot,
-  Dereference,
-  AddressOf,
-  // postfix
-  PostfixIncrement,
-  PostfixDecrement,
-  MemberAccess,
-  PointerMemberAccess,
+  #define UNARY_OPERATOR_ENUM_DEF(name) name,
+  UNARY_OPERATOR_LIST(UNARY_OPERATOR_ENUM_DEF)
 };
 
+
+#define BINARY_OPERATOR_LIST(E) \
+  E(Plus)\
+  E(Minus)\
+  E(Multiply)\
+  E(Divide)\
+  E(Less)\
+  E(LessEq)\
+  E(Greater)\
+  E(GreaterEq)\
+  E(Equal)\
+  E(NotEqual)\
+  E(LogicalAnd)\
+  E(LogicalOr)\
+  E(Assign)\
+  E(PlusAssign)\
+  E(MinusAssign)\
+  E(MultiplyAssign)\
+  E(DivideAssign)\
+  E(Subscript)
 enum class BinaryOperator {
-  Plus,
-  Minus,
-  Multiply,
-  Divide,
-  Less,
-  LessEq,
-  Greater,
-  GreaterEq,
-  Equal,
-  NotEqual,
-  LogicalAnd,
-  LogicalOr,
-  Assign,
-  PlusAssign,
-  MinusAssign,
-  MultiplyAssign,
-  DivideAssign,
-  // postfix
-  Subscript,
+  #define BINARY_OPERATOR_ENUM_DEF(name) name,
+  BINARY_OPERATOR_LIST(BINARY_OPERATOR_ENUM_DEF)
 };
 
 std::string to_string(BinaryOperator op);
 std::string to_string(UnaryOperator op);
 
-struct ASTBinaryOperatorData : ASTExpression {
+AST_NODE_STRUCT_DEF(BinaryOperation)
   BinaryOperator op;
+  ValueExpression lhs;
+  ValueExpression rhs;
 };
 
-enum class BinaryOperatorChildren {
-  LHSExpression = 1,
-  RHSExpression = 2,
-};
-
-struct ASTUnaryOperatorData : ASTExpression {
+AST_NODE_STRUCT_DEF(UnaryOperation)
   UnaryOperator op;
+  ValueExpression operand;
 };
 
-enum class UnaryOperatorChildren {
-  Expression = 1,
+AST_NODE_STRUCT_DEF(MemberOperation)
+  ValueExpression reference;
+  name_id member = -1;
 };
 
-struct ASTCastOperatorData : ASTExpression {};
-
-enum class CastOperatorChildren {
-  Type = 1,
-  Expression = 2,
+AST_NODE_STRUCT_DEF(PointerMemberOperation)
+  ValueExpression pointer;
+  name_id member = -1;
 };
 
-struct ASTCallData : ASTExpression {
-  bool is_generic;
-  bool is_function_pointer;
+AST_NODE_STRUCT_DEF(CastOperation)
+  TypeExpression desired_type;
+  ValueExpression value;
 };
 
-// @note generic parameter list or function pointer may be missing
-enum class CallChildren {
-  GenericParameterList = 1,
-  FunctionPointer = 2,
-  Expression = -1,
+AST_NODE_STRUCT_DEF(Call)
+  TypeOrValueExpression first_generic_parameter;
+  size_t num_generic_parameters;
+  
+  name_id function_name = -1;
+  ValueExpression function_pointer;
+
+  ValueExpression first_parameter;
+  size_t num_parameters;
 };
 
-//
-// other
-//
-struct ASTFunctionDeclarationData {
+AST_NODE_STRUCT_DEF(FunctionDeclaration)
+  name_id identifier = -1;
+
+  GenericParameterDefinition* first_generic_parameter = nullptr;
+  size_t num_generic_parameters;
+  ASTChildrenIterator<GenericParameterDefinition> generic_parameter_definitions();
+
+  TypeExpression definition;
+  Block* body;
+  
   llvm::Function* llvm_function = nullptr;
-
-  bool is_generic;
-  bool has_type;
 };
 
-// @note generic parameter definition list or type may be missing
-enum class FunctionDeclarationChildren {
-  GenericParameterDefinitionList = 1,
-  Type = 2,
-  Block = 3,
+AST_NODE_STRUCT_DEF(VariableDeclaration)
+  name_id identifier = -1;
+  TypeExpression desired_type;
+  ValueExpression value;
 };
 
-struct ASTVariableDeclarationData {
-  bool has_type;
+struct ConditionAndBlock {
+  ValueExpression condition;
+  Block* block;
 };
 
-// type may be missing
-enum class VariableDeclarationChildren {
-  Type = 1,
-  Expression = 2,
+class ConditionAndBlockIterator {
+private:
+  struct ASTChildIter {
+    ASTChildIter(ASTNode* node) : cur(node) { };
+    ASTChildIter operator++() {
+      cur = cur->next_sibling->next_sibling;
+      return *this;
+    }
+    ConditionAndBlock operator*() {
+      LANG_ASSERT(cur != nullptr);
+      LANG_ASSERT(cur->next_sibling != nullptr && cur->next_sibling->type == NodeType::Block);
+
+      return ConditionAndBlock {
+        .condition = ValueExpression{.any = cur},
+        .block = (Block*)cur->next_sibling,
+      };
+    }
+    bool operator!=(ASTChildIter &cmp_childiter) {
+      return cur != cmp_childiter.cur;
+    }
+    ASTNode* cur;
+  };
+
+public:
+  ConditionAndBlockIterator(ASTNode* first_condition, ASTNode* else_block) : first_condition(first_condition), else_block(else_block) {}
+
+  ASTChildIter begin() { return ASTChildIter(first_condition); }
+
+  ASTChildIter end() { return ASTChildIter(else_block); }
+
+private:
+  ASTNode* first_condition;
+  ASTNode* else_block;
 };
 
-struct ASTIfData {
-  bool has_else;
+AST_NODE_STRUCT_DEF(IfElseStatement)
+  ValueExpression first_condition;
+  ConditionAndBlockIterator condition_and_blocks();
+  Block* else_block;
 
   llvm::BasicBlock* llvm_merged_bb = nullptr;
 };
 
-struct ASTBlockData {
+AST_NODE_STRUCT_DEF(WhileStatement)
+  ValueExpression condition;
+  Block* body;
+};
+
+AST_NODE_STRUCT_DEF(ExpressionStatement)
+  ValueExpression expression;
+};
+
+AST_NODE_STRUCT_DEF(ReturnStatement)
+  ValueExpression expression;
+};
+
+AST_NODE_STRUCT_DEF(Block)  
+  ASTNode* first_statement_or_scope = nullptr;
+  size_t num_statements_or_scopes;
+  ASTChildrenIterator<ASTNode> statements_or_scope();
+
   std::string llvm_bb_name = "block";
   llvm::BasicBlock* llvm_bb = nullptr;
   bool dont_create_basic_block = false;
 };
 
-struct AST;
-
-struct ASTNode {
-  TextSpan span;
-  ASTNodeType type;
-
-  int id = 0;
-  int parent = -1;
-
-  int size = 1;
-  int num_children = 0;
-
-  bool malformed = false;
-
-  name_id name = -1;
-  unique_void_ptr data;
-
-  ASTNode() = delete;
-  ASTNode(ASTNodeType type);
-
-  template<typename T>
-  T* cast_data() {
-    return (T*)data.get();
-  }
-
-  template<typename T>
-  const T* cast_data() const {
-    return (const T*)data.get();
-  }
-};
-
-std::string to_string(const AST& ast, const ASTNode& node);
-
-struct AST {
-  std::vector<ASTNode> nodes;
-  std::unordered_multimap<name_id, std::string> name_id_to_name = {
-    { name_id_int, "int" },
-    { name_id_float, "float" },
-    { name_id_ptr, "ptr" },
-    { name_id_buffer, "buffer" },
-  };
-  name_id id_counter = 0;
-
-  ASTNode& make_node(ASTNodeType type);
-
-  std::string get_name(name_id id) const;
-  name_id get_name_id(std::string name);
-};
-
-class ASTChildrenIterator {
-private:
-  struct ASTChildIter {
-    ASTChildIter(AST& ast, int nodei, int child_index) : ast(ast), id(nodei + 1), child_index(child_index) { };
-    ASTChildIter operator++() {
-      id += ast.nodes[id].size;
-      child_index++;
-      return *this;
-    }
-    ASTNode& operator*() {
-      return ast.nodes[id];
-    }
-    bool operator!=(ASTChildIter &cmp_childiter) {
-      return child_index != cmp_childiter.child_index;
-    }
-    AST& ast;
-    int id;
-    int child_index;
-  };
-
-public:
-  ASTChildrenIterator(AST& ast, int nodei) : ast(ast), nodei(nodei) {}
-
-  ASTChildIter begin() { return ASTChildIter(ast, nodei, 0); }
-
-  ASTChildIter end() { return ASTChildIter(ast, nodei, ast.nodes[nodei].num_children); }
-
-private:
-  AST& ast;
-  int nodei;
-};
-
-void construct_data(ASTNode& node);
-
-int last_child(AST& ast, int nodei);
-
-ASTNode& get_child(AST& ast, int nodei, int childi);
-
-void print_ast(const AST& ast);
-
-void add_child(AST& ast, int parent, int child);
-
-int make_parent(AST& ast, ASTNodeType type, int child);
+#ifdef LANG_DEBUG
+template<typename T>
+std::string debug_property(const AST& ast, T v) {
+  return std::to_string(v);
+}
+#endif

@@ -2,12 +2,6 @@
 #include "lexer.hpp"
 #include "logging.hpp"
 
-int make_node(AST& ast, ASTNodeType type, Lexer& lexer) {
-  auto& node = ast.make_node(type);
-  node.span = lexer.peek_span();
-  return node.id;
-}
-
 bool expect_token(const TokenType& expected, Lexer& lexer) {
   if (lexer.peek_type() != expected) {
     return false;
@@ -25,66 +19,72 @@ bool expect_token(const TokenType& expected, Lexer& lexer, Logger& logger) {
   return true;
 }
 
-bool expect_token(ASTNode& node, const TokenType& expected, Lexer& lexer) {
+bool expect_token(ASTNode* node, const TokenType& expected, Lexer& lexer) {
   if (lexer.peek_type() != expected) {
-    node.malformed = true;
+    node->malformed = true;
     return false;
   }
 
-  node.span.absorb(lexer.peek_span());
+  node->span.absorb(lexer.peek_span());
   lexer.consume_token();
   return true;
 }
 
-bool expect_token(ASTNode& node, const TokenType& expected, Lexer& lexer, Logger& logger, std::string message) {
+bool expect_token(ASTNode* node, const TokenType& expected, Lexer& lexer, Logger& logger, std::string message) {
   if (!expect_token(node, expected, lexer)) {
     if (message.empty())
       message = "Expected " + to_string(expected) + ".";
-    logger.log(Errors::Syntax, message, node.span);
+    logger.log(Errors::Syntax, message, node->span);
     return false;
   }
   return true;
 }
 
-void absorb_and_consume(AST& ast, int nodei, Lexer& lexer) {
-  ast.nodes[nodei].span.absorb(lexer.peek_span());
+void absorb_and_consume(ASTNode* node, Lexer& lexer) {
+  node->span.absorb(lexer.peek_span());
   lexer.consume_token();
 }
 
-name_id add_name(AST& ast, int nodei, Lexer& lexer) {
-  name_id id = ast.get_name_id(lexer.peek_value());
-  ast.nodes[nodei].name = id;
-  return id;
+name_id get_next_name(AST& ast, Lexer& lexer) {
+  return ast.get_name_id(lexer.peek_value());
 }
 
-name_id get_name(AST& ast, int nodei) {
-  LANG_ASSERT(ast.nodes[nodei].name >= 0);
-  return ast.nodes[nodei].name;
-}
-
-bool not_end(Lexer& lexer, Logger& logger, AST& ast, int nodei, std::string context) {
+bool not_end(Lexer& lexer, Logger& logger, ASTNode* node) {
   if (lexer.peek_type() == TokenType::End) {
-    logger.log(Errors::Syntax, context != "" ? ("Unexpectedly reached end of file while parsing " + context + ".") : "Unexpectedly reached end of file.", ast.nodes[nodei].span);
-    ast.nodes[nodei].malformed = true;
+    logger.log(Errors::Syntax, "Unexpectedly reached end of file.", node->span);
+    node->malformed = true;
     return false;
   }
 
   return true;
 }
 
-bool not_end(Lexer& lexer, Logger& logger, std::string context) {
+bool not_end(Lexer& lexer, Logger& logger) {
   if (lexer.peek_type() == TokenType::End) {
-    logger.log(Errors::Syntax, context != "" ? ("Unexpectedly reached end of file while parsing " + context + ".") : "Unexpectedly reached end of file.", lexer.peek_span());
+    logger.log(Errors::Syntax, "Unexpectedly reached end of file.", lexer.peek_span());
     return false;
   }
 
   return true;
 }
 
-bool not_matching(TokenType t, Lexer& lexer, Logger& logger, AST& ast, int nodei, std::string context) {
-  if (not_end(lexer, logger, ast, nodei, context)) {
+bool not_matching(TokenType t, Lexer& lexer, Logger& logger) {
+  if (not_end(lexer, logger)) {
     if (lexer.matches(t)) {
-      absorb_and_consume(ast, nodei, lexer);
+      lexer.consume_token();
+      return false;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+bool not_matching(TokenType t, Lexer& lexer, Logger& logger, ASTNode* node) {
+  if (not_end(lexer, logger, node)) {
+    if (lexer.matches(t)) {
+      absorb_and_consume(node, lexer);
       return false;
     }
 

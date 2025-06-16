@@ -8,6 +8,6 @@ struct ExpressionParsingContext {
     bool in_square = false;
 };
 
-void parse_expression_add_child(AST& ast, Lexer& lexer, Logger& logger, int parenti, ExpressionParsingContext settings = ExpressionParsingContext{}, int parent_precedence = -1);
+ValueExpression parse_expression(AST& ast, Lexer& lexer, Logger& logger, ExpressionParsingContext settings = ExpressionParsingContext{}, int parent_precedence = -1);
 
 bool match_compile_time_directive(const Lexer& lexer);
